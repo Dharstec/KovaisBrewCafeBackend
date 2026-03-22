@@ -4,6 +4,7 @@ const controller = require("../controllers/billing.js");
 const { verifyToken } = require("../middleware/auth.js");
 
 router.post("/bills", verifyToken, controller.createBill);
+router.post("/bills/sync", verifyToken, controller.syncOfflineBill);
 router.post("/bill/complete/:id", verifyToken, controller.completeBill);
 router.get("/pending", verifyToken, controller.pendingBills);
 router.get("/completed", verifyToken, controller.completedBills);

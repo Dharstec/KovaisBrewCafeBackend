@@ -7,13 +7,25 @@ exports.createBill = async (req, res) => {
   const client = await DB.getClient(); // pg client
 
   try {
-    const { items, customer_name } = req.body;
+    const { items, customer_name, local_id } = req.body;
 
     if (!Array.isArray(items) || !items.length) {
       return res.status(400).json({
         code: "INVALID_ITEMS",
         message: "Items array required"
       });
+    }
+
+    // ── Idempotency: if same local_id already exists, return existing bill ──
+    if (local_id) {
+      const existing = await client.query(
+        `SELECT id, grand_total FROM bills WHERE local_id = $1`,
+        [local_id]
+      );
+      if (existing.rows.length) {
+        client.release();
+        return res.json({ bill_id: existing.rows[0].id, grand_total: existing.rows[0].grand_total });
+      }
     }
 
     await client.query("BEGIN");
@@ -84,10 +96,10 @@ exports.createBill = async (req, res) => {
        2️⃣ CREATE BILL (SAFE NOW)
        =============================== */
     const billRes = await client.query(
-      `INSERT INTO bills (customer_name, status, grand_total)
-       VALUES ($1, 'PENDING', 0)
+      `INSERT INTO bills (customer_name, status, grand_total, local_id)
+       VALUES ($1, 'PENDING', 0, $2)
        RETURNING id`,
-      [customer_name]
+      [customer_name, local_id || null]
     );
 
     const billId = billRes.rows[0].id;
@@ -477,21 +489,111 @@ exports.pendingBills = async (req, res) => {
 
 exports.completeBill = async (req, res) => {
   try {
+    const billId = req.params.id;
+    const { customer_name, payment_mode, grand_total, discount_amount = 0 } = req.body;
+
+    // Idempotent — already completed bills just return success
+    const existing = await DB.PostgresAny(
+      `SELECT status FROM bills WHERE id = $1`,
+      [billId]
+    );
+    if (existing[0]?.status === 'COMPLETED') {
+      return res.json({ message: 'Bill already completed' });
+    }
+
     await DB.PostgresUpdate(
       "bills",
       {
-        customer_name: req.body.customer_name,
-        payment_mode: req.body.payment_mode,
-        status: "COMPLETED"
+        customer_name,
+        payment_mode,
+        status: "COMPLETED",
+        grand_total: Number(grand_total) || 0,
+        discount_amount: Number(discount_amount) || 0
       },
-      { id: req.params.id }
+      { id: billId }
     );
 
     res.json({ message: "Bill completed" });
-
   } catch (err) {
     console.error("Complete bill error:", err);
     res.status(500).json({ error: err.message });
+  }
+};
+
+
+/* =========================================================
+   SYNC OFFLINE BILL — create + complete atomically
+   local_id guarantees idempotency (no duplicates on retry)
+   ========================================================= */
+exports.syncOfflineBill = async (req, res) => {
+  const client = await DB.getClient();
+  try {
+    const { items, customer_name, payment_mode, grand_total, discount_amount = 0, local_id } = req.body;
+
+    if (!Array.isArray(items) || !items.length)
+      return res.status(400).json({ msg: "Items required" });
+
+    // ── Idempotency check ──
+    if (local_id) {
+      const existing = await client.query(
+        `SELECT id FROM bills WHERE local_id = $1`,
+        [local_id]
+      );
+      if (existing.rows.length) {
+        client.release();
+        return res.json({ bill_id: existing.rows[0].id, synced: true });
+      }
+    }
+
+    await client.query("BEGIN");
+
+    // Insert as COMPLETED directly (offline bill, stock deducted best-effort)
+    const billRes = await client.query(
+      `INSERT INTO bills (customer_name, status, grand_total, discount_amount, payment_mode, local_id)
+       VALUES ($1,'COMPLETED',$2,$3,$4,$5) RETURNING id`,
+      [customer_name, Number(grand_total) || 0, Number(discount_amount) || 0, payment_mode, local_id || null]
+    );
+    const billId = billRes.rows[0].id;
+
+    for (const i of items) {
+      await client.query(
+        `INSERT INTO bill_items (bill_id, product_id, product_name, price, qty)
+         VALUES ($1,$2,$3,$4,$5)`,
+        [billId, i.productId, i.name, i.price, i.qty]
+      );
+
+      // Best-effort stock deduction (allow negative for offline sync)
+      const product = await client.query(
+        `SELECT track_stock FROM products WHERE id=$1`, [i.productId]
+      );
+      if (product.rows[0]?.track_stock) {
+        await client.query(
+          `UPDATE products SET current_qty = current_qty - $1 WHERE id=$2`,
+          [i.qty, i.productId]
+        );
+      }
+
+      // Recipe stock
+      const recipes = await client.query(
+        `SELECT raw_product_id, used_qty FROM product_recipes WHERE sale_product_id=$1`,
+        [i.productId]
+      );
+      for (const r of recipes.rows) {
+        await client.query(
+          `UPDATE products SET current_qty = current_qty - $1 WHERE id=$2`,
+          [r.used_qty * i.qty, r.raw_product_id]
+        );
+      }
+    }
+
+    await client.query("COMMIT");
+    res.json({ bill_id: billId, synced: true });
+  } catch (err) {
+    await client.query("ROLLBACK");
+    console.error("Sync offline bill error:", err);
+    res.status(500).json({ error: err.message });
+  } finally {
+    client.release();
   }
 };
 
