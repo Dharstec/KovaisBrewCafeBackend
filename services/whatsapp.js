@@ -108,9 +108,21 @@ function init() {
 async function sendToGroup(groupId, message) {
   if (!isReady) throw new Error('WhatsApp not connected');
   const id = groupId.trim();
-  // getChatById is more reliable than client.sendMessage for groups
-  const chat = await client.getChatById(id);
-  await chat.sendMessage(message);
+  console.log('[WhatsApp] Sending to groupId:', JSON.stringify(id));
+
+  // Validate format — groups must end with @g.us, personal with @c.us
+  if (!id.includes('@')) {
+    throw new Error(`Invalid chat ID format: "${id}". Group IDs must end with @g.us (e.g. 120363XXXXXXXXXX@g.us)`);
+  }
+
+  try {
+    await client.sendMessage(id, message);
+  } catch (err) {
+    // Retry once after short delay (WhatsApp Web may still be loading)
+    console.log('[WhatsApp] First attempt failed, retrying in 3s…');
+    await new Promise(r => setTimeout(r, 3000));
+    await client.sendMessage(id, message);
+  }
 }
 
 async function getGroups() {
@@ -118,7 +130,13 @@ async function getGroups() {
   const chats = await client.getChats();
   return chats
     .filter(c => c.isGroup)
-    .map(c => ({ id: c.id._serialized, name: c.name }));
+    .map(c => {
+      // Always use the clean XXXXXXXX@g.us format
+      const raw = c.id._serialized || '';
+      const match = raw.match(/(\d+@g\.us)/);
+      const id = match ? match[1] : raw;
+      return { id, name: c.name };
+    });
 }
 
 module.exports = {

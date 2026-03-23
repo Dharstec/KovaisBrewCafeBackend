@@ -343,10 +343,14 @@ exports.sendWhatsappNow = async (req, res) => {
       return res.status(503).json({ message: 'WhatsApp not connected — please scan the QR code first.' });
     }
 
-    const groupId = req.body.groupId || process.env.WHATSAPP_GROUP_ID;
+    // Extract clean chat ID — strip any prefix garbage, keep only XXXXXXXX@g.us or @c.us
+    const raw = (req.body.groupId || process.env.WHATSAPP_GROUP_ID || '').trim();
+    const match = raw.match(/(\d+@[gc]\.us)/);
+    const groupId = match ? match[1] : raw;
     if (!groupId) {
       return res.status(400).json({ message: 'No group selected. Choose a group from the list above.' });
     }
+    console.log('[WhatsApp] Using groupId:', JSON.stringify(groupId));
 
     const message = await summary.buildWhatsAppMessage();
     await wa.sendToGroup(groupId, message);
