@@ -1,4 +1,6 @@
-const DB = require("../middleware/dbFunctions");
+const DB      = require("../middleware/dbFunctions");
+const wa      = require("../services/whatsapp");
+const summary = require("../services/dailySummary");
 
 /* ─────────────────────────────────────────
    HELPER — resolve the date param
@@ -304,5 +306,62 @@ exports.getPaymentBreakdown = async (req, res) => {
   } catch (err) {
     console.error('Payment breakdown failed:', err);
     res.status(500).json({ message: 'Payment breakdown failed' });
+  }
+};
+
+/* ─────────────────────────────────────────
+   GET /dashboard/whatsapp-status
+   Returns connection status + QR code (if not connected)
+   ───────────────────────────────────────── */
+exports.getWhatsappStatus = (req, res) => {
+  const { qr, ready, error } = wa.getQR();
+  res.json({ ready, qr: qr || null, error: error || null });
+};
+
+/* ─────────────────────────────────────────
+   GET /dashboard/whatsapp-groups
+   Returns list of WhatsApp groups (once connected)
+   ───────────────────────────────────────── */
+exports.getWhatsappGroups = async (req, res) => {
+  try {
+    const groups = await wa.getGroups();
+    res.json(groups);
+  } catch (err) {
+    res.status(503).json({ message: err.message });
+  }
+};
+
+/* ─────────────────────────────────────────
+   POST /dashboard/whatsapp-send-now
+   Admin: send daily summary immediately
+   Body: { groupId: "..." }  — optional override
+   ───────────────────────────────────────── */
+exports.sendWhatsappNow = async (req, res) => {
+  try {
+    const groupId = req.body.groupId || process.env.WHATSAPP_GROUP_ID;
+    if (!groupId) return res.status(400).json({ message: 'No group configured. Set WHATSAPP_GROUP_ID in .env or pass groupId in body.' });
+
+    const message = await summary.buildWhatsAppMessage();
+    await wa.sendToGroup(groupId, message);
+
+    // Also save the configured groupId to env hint (not writing file, just in-memory for this run)
+    if (req.body.groupId) process.env.WHATSAPP_GROUP_ID = req.body.groupId;
+
+    res.json({ ok: true, message: 'Summary sent ✅' });
+  } catch (err) {
+    res.status(503).json({ message: err.message });
+  }
+};
+
+/* ─────────────────────────────────────────
+   GET /dashboard/whatsapp-preview
+   Returns the formatted message text (no send)
+   ───────────────────────────────────────── */
+exports.previewWhatsapp = async (req, res) => {
+  try {
+    const message = await summary.buildWhatsAppMessage();
+    res.json({ message });
+  } catch (err) {
+    res.status(500).json({ message: 'Failed to generate summary' });
   }
 };

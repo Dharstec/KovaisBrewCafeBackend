@@ -5,6 +5,12 @@ const bodyParser = require('body-parser');
 
 require("dotenv").config();
 
+/* ── Services ── */
+const whatsapp = require('./services/whatsapp');
+const cron     = require('./services/cron');
+whatsapp.init();   // start WhatsApp client (scan QR once)
+cron.start();      // schedule 11 PM daily summary
+
 const app = express();
 app.set('trust proxy', 1);
 app.use(cors());
