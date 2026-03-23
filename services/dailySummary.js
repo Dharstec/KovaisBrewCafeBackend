@@ -19,9 +19,10 @@ async function getTodaySummary() {
   `);
 
   // Expenses
+  const TABLE_SPENT = process.env.TABLE_SPENT || 'spent';
   const expenses = await DB.PostgresAny(`
     SELECT COALESCE(SUM(amount), 0) AS total_expense
-    FROM shop_spend
+    FROM ${TABLE_SPENT}
     WHERE date::date = CURRENT_DATE
   `);
 
