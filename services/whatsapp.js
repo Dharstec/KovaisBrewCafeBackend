@@ -107,7 +107,10 @@ function init() {
 
 async function sendToGroup(groupId, message) {
   if (!isReady) throw new Error('WhatsApp not connected');
-  await client.sendMessage(groupId, message);
+  const id = groupId.trim();
+  // getChatById is more reliable than client.sendMessage for groups
+  const chat = await client.getChatById(id);
+  await chat.sendMessage(message);
 }
 
 async function getGroups() {
