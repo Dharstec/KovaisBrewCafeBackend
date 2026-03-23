@@ -10,8 +10,9 @@ let isReady     = false;
 let initError   = null;
 let initStarted = false;
 
-// Use system Chrome — no bundled Chromium in this project
-const CHROME_PATH = '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome';
+// Use puppeteer's bundled Chrome for Testing
+const puppeteer   = require('puppeteer');
+const CHROME_PATH = puppeteer.executablePath();
 
 const client = new Client({
   authStrategy: new LocalAuth({ dataPath: '.wwebjs_auth' }),
