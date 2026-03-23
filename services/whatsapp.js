@@ -10,9 +10,37 @@ let isReady     = false;
 let initError   = null;
 let initStarted = false;
 
-// Use puppeteer's bundled Chrome for Testing
-const puppeteer   = require('puppeteer');
-const CHROME_PATH = puppeteer.executablePath();
+// Resolve Chrome path: prefer puppeteer's bundled binary, fall back to system installs
+const puppeteer = require('puppeteer');
+const fs        = require('fs');
+
+function resolveChromePath() {
+  // 1. Puppeteer's own downloaded Chrome
+  try {
+    const p = puppeteer.executablePath();
+    if (p && fs.existsSync(p)) return p;
+  } catch (_) {}
+
+  // 2. Common Linux paths
+  const linuxPaths = [
+    '/usr/bin/google-chrome',
+    '/usr/bin/google-chrome-stable',
+    '/usr/bin/chromium-browser',
+    '/usr/bin/chromium',
+    '/snap/bin/chromium',
+  ];
+  for (const p of linuxPaths) {
+    if (fs.existsSync(p)) return p;
+  }
+
+  // 3. macOS
+  const macPath = '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome';
+  if (fs.existsSync(macPath)) return macPath;
+
+  return null;
+}
+
+const CHROME_PATH = resolveChromePath();
 
 const client = new Client({
   authStrategy: new LocalAuth({ dataPath: '.wwebjs_auth' }),
