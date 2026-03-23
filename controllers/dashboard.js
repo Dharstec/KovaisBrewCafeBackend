@@ -313,7 +313,7 @@ exports.getPaymentBreakdown = async (req, res) => {
    GET /dashboard/whatsapp-status
    Returns connection status + QR code (if not connected)
    ───────────────────────────────────────── */
-exports.getWhatsappStatus = (req, res) => {
+exports.getWhatsappStatus = (_req, res) => {
   const { qr, ready, error } = wa.getQR();
   res.json({ ready, qr: qr || null, error: error || null });
 };
@@ -322,7 +322,7 @@ exports.getWhatsappStatus = (req, res) => {
    GET /dashboard/whatsapp-groups
    Returns list of WhatsApp groups (once connected)
    ───────────────────────────────────────── */
-exports.getWhatsappGroups = async (req, res) => {
+exports.getWhatsappGroups = async (_req, res) => {
   try {
     const groups = await wa.getGroups();
     res.json(groups);
@@ -338,18 +338,25 @@ exports.getWhatsappGroups = async (req, res) => {
    ───────────────────────────────────────── */
 exports.sendWhatsappNow = async (req, res) => {
   try {
+    const { ready } = wa.getQR();
+    if (!ready) {
+      return res.status(503).json({ message: 'WhatsApp not connected — please scan the QR code first.' });
+    }
+
     const groupId = req.body.groupId || process.env.WHATSAPP_GROUP_ID;
-    if (!groupId) return res.status(400).json({ message: 'No group configured. Set WHATSAPP_GROUP_ID in .env or pass groupId in body.' });
+    if (!groupId) {
+      return res.status(400).json({ message: 'No group selected. Choose a group from the list above.' });
+    }
 
     const message = await summary.buildWhatsAppMessage();
     await wa.sendToGroup(groupId, message);
 
-    // Also save the configured groupId to env hint (not writing file, just in-memory for this run)
     if (req.body.groupId) process.env.WHATSAPP_GROUP_ID = req.body.groupId;
 
-    res.json({ ok: true, message: 'Summary sent ✅' });
+    res.json({ ok: true, message: 'Summary sent to WhatsApp ✅' });
   } catch (err) {
-    res.status(503).json({ message: err.message });
+    console.error('[WhatsApp send]', err);
+    res.status(503).json({ message: 'Send failed: ' + err.message });
   }
 };
 
@@ -357,7 +364,7 @@ exports.sendWhatsappNow = async (req, res) => {
    GET /dashboard/whatsapp-preview
    Returns the formatted message text (no send)
    ───────────────────────────────────────── */
-exports.previewWhatsapp = async (req, res) => {
+exports.previewWhatsapp = async (_req, res) => {
   try {
     const message = await summary.buildWhatsAppMessage();
     res.json({ message });
