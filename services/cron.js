@@ -1,5 +1,6 @@
 /* ═══════════════════════════════════════════════════
    Cron Service — sends daily WhatsApp summary at 11 PM
+   Chrome starts at 11 PM, sends report, then shuts down.
    ═══════════════════════════════════════════════════ */
 
 const cron    = require('node-cron');
@@ -7,7 +8,6 @@ const wa      = require('./whatsapp');
 const summary = require('./dailySummary');
 
 function start() {
-  // Every day at 23:00 (11 PM)
   cron.schedule('0 23 * * *', async () => {
     const groupId = process.env.WHATSAPP_GROUP_ID;
     if (!groupId) {
@@ -15,12 +15,20 @@ function start() {
       return;
     }
 
+    console.log('[Cron] 11 PM — starting WhatsApp for daily summary…');
+
     try {
+      wa.init();                    // launch Chrome
+      await wa.waitReady(90000);    // wait up to 90s for connection
+
       const message = await summary.buildWhatsAppMessage();
       await wa.sendToGroup(groupId, message);
-      console.log('[Cron] Daily summary sent to WhatsApp ✅');
+      console.log('[Cron] Daily summary sent ✅');
     } catch (err) {
       console.error('[Cron] Failed to send daily summary:', err.message);
+    } finally {
+      await wa.destroy();           // shut Chrome down
+      console.log('[Cron] WhatsApp closed after sending');
     }
   }, { timezone: 'Asia/Kolkata' });
 
