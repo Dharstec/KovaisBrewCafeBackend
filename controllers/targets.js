@@ -274,6 +274,22 @@ const getTargetAchievement = async (req, res) => {
     const total_budget       = items.reduce((s, i) => s + parseFloat(i.target_amount || 0), 0);
     const avg_daily_expense  = days_elapsed > 0 ? total_expenses / days_elapsed : 0;
 
+    // ── Budget coverage: how much more do you need to earn? ───────────────
+    // Budget items (salaries, rent, EB) are end-of-month obligations.
+    // Advances already paid count toward those obligations.
+    const total_item_paid    = Object.values(itemActuals).reduce((s, v) => s + v, 0);
+    const budget_remaining   = Math.max(0, total_budget - total_item_paid);  // obligations still unpaid
+
+    // Future daily expenses estimated for remaining days
+    const projected_future_daily_exp = avg_daily_expense * days_left;
+
+    // What you still need to accumulate (net of current in_hand)
+    const net_still_needed   = Math.max(0, budget_remaining + projected_future_daily_exp - in_hand);
+
+    // Daily sales pace needed to cover all obligations
+    const budget_daily_needed = days_left > 0 ? Math.ceil(net_still_needed / days_left) : 0;
+    const budget_on_track     = avg_daily_sales >= budget_daily_needed;
+
     res.json({
       target,
       // Sales
@@ -293,6 +309,13 @@ const getTargetAchievement = async (req, res) => {
       total_expenses,
       total_budget,
       avg_daily_expense,
+      // Budget coverage
+      total_item_paid,
+      budget_remaining,
+      projected_future_daily_exp,
+      net_still_needed,
+      budget_daily_needed,
+      budget_on_track,
       // Summary
       in_hand,
       net_profit,
