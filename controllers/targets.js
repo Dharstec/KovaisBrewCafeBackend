@@ -5,13 +5,14 @@ const DB = require('../middleware/dbFunctions');
 ────────────────────────────────────────────── */
 const createTarget = async (req, res) => {
   try {
-    const { name = 'Monthly Target', start_date, end_date } = req.body;
+    const { name = 'Monthly Target', start_date, end_date, sales_target = 0 } = req.body;
     if (!start_date || !end_date)
       return res.status(400).json({ message: 'start_date and end_date are required' });
 
     const rows = await DB.PostgresAny(
-      `INSERT INTO targets (name, start_date, end_date) VALUES ($1,$2,$3) RETURNING *`,
-      [name, start_date, end_date]
+      `INSERT INTO targets (name, start_date, end_date, sales_target)
+       VALUES ($1,$2,$3,$4) RETURNING *`,
+      [name, start_date, end_date, sales_target]
     );
     res.status(201).json(rows[0]);
   } catch (err) {
@@ -25,7 +26,7 @@ const createTarget = async (req, res) => {
 /* ──────────────────────────────────────────────
    GET ALL TARGETS
 ────────────────────────────────────────────── */
-const getTargets = async (req, res) => {
+const getTargets = async (_req, res) => {
   try {
     const rows = await DB.PostgresAny(`
       SELECT
@@ -71,16 +72,17 @@ const getTargetById = async (req, res) => {
 const updateTarget = async (req, res) => {
   try {
     const { id } = req.params;
-    const { name, start_date, end_date } = req.body;
+    const { name, start_date, end_date, sales_target } = req.body;
 
     const rows = await DB.PostgresAny(`
       UPDATE targets
-      SET name       = COALESCE($1, name),
-          start_date = COALESCE($2, start_date),
-          end_date   = COALESCE($3, end_date),
-          updated_at = NOW()
-      WHERE id = $4 RETURNING *
-    `, [name, start_date, end_date, id]);
+      SET name         = COALESCE($1, name),
+          start_date   = COALESCE($2, start_date),
+          end_date     = COALESCE($3, end_date),
+          sales_target = COALESCE($4, sales_target),
+          updated_at   = NOW()
+      WHERE id = $5 RETURNING *
+    `, [name, start_date, end_date, sales_target, id]);
 
     if (!rows.length) return res.status(404).json({ message: 'Target not found' });
 
@@ -152,10 +154,11 @@ const deleteTargetItem = async (req, res) => {
 
 /* ──────────────────────────────────────────────
    GET TARGET ACHIEVEMENT
-   Returns:
-   - actual sales (from bills) for the date range
-   - actual spent per expense item (from spent, matched by reason keyword)
-   - daily average, projected totals, net profit
+   Includes:
+   - Actual sales from bills
+   - Actual expenses from spent table (per item by keyword)
+   - Employee advances paid in the date range
+   - Daily pace metrics & projection
 ────────────────────────────────────────────── */
 const getTargetAchievement = async (req, res) => {
   try {
@@ -170,9 +173,9 @@ const getTargetAchievement = async (req, res) => {
     );
     target.items = items;
 
-    const { start_date, end_date } = target;
+    const { start_date, end_date, sales_target } = target;
 
-    // ── Actual sales from bills ──
+    // ── Actual sales ──────────────────────────────────
     const salesRow = await DB.PostgresAny(`
       SELECT
         COALESCE(SUM(grand_total), 0)                                              AS total_sales,
@@ -184,14 +187,31 @@ const getTargetAchievement = async (req, res) => {
         AND DATE(created_at) BETWEEN $1::date AND $2::date
     `, [start_date, end_date]);
 
-    // ── Total actual expenses (all spent in range) ──
+    // ── Expenses from spent table ─────────────────────
     const spentRow = await DB.PostgresAny(`
       SELECT COALESCE(SUM(amount), 0) AS total_spent
       FROM spent
       WHERE date::date BETWEEN $1::date AND $2::date
     `, [start_date, end_date]);
 
-    // ── Per item: match actual from spent by reason keyword ──
+    // ── Employee advances in date range ───────────────
+    const advanceRow = await DB.PostgresAny(`
+      SELECT
+        COALESCE(SUM(ea.amount), 0) AS total_advance,
+        JSON_AGG(
+          JSON_BUILD_OBJECT(
+            'employee_name', e.name,
+            'amount',        ea.amount,
+            'advance_date',  ea.advance_date,
+            'note',          ea.note
+          ) ORDER BY ea.advance_date DESC
+        ) FILTER (WHERE ea.id IS NOT NULL) AS advance_list
+      FROM employee_advance ea
+      JOIN employees e ON e.id = ea.employee_id
+      WHERE ea.advance_date::date BETWEEN $1::date AND $2::date
+    `, [start_date, end_date]);
+
+    // ── Per item: actual from spent by keyword ─────────
     const itemActuals = {};
     for (const item of items) {
       const kw = `%${item.item_name.toLowerCase()}%`;
@@ -204,39 +224,60 @@ const getTargetAchievement = async (req, res) => {
       itemActuals[item.id] = parseFloat(r[0]?.actual || 0);
     }
 
-    // ── Days calculation ──
-    const now       = new Date();
-    const start     = new Date(start_date);
-    const end       = new Date(end_date);
+    // ── Days calculation ──────────────────────────────
+    const now        = new Date();
+    const start      = new Date(start_date);
+    const end        = new Date(end_date);
     const total_days   = Math.max(1, Math.round((end - start) / 86400000) + 1);
     const days_elapsed = Math.max(1, Math.min(total_days, Math.round((now - start) / 86400000) + 1));
     const days_left    = Math.max(0, total_days - days_elapsed);
 
-    const actual_sales   = parseFloat(salesRow[0].total_sales);
-    const cash_sales     = parseFloat(salesRow[0].cash_sales);
-    const upi_sales      = parseFloat(salesRow[0].upi_sales);
-    const total_bills    = salesRow[0].total_bills;
-    const total_spent    = parseFloat(spentRow[0].total_spent);
-    const net_profit     = actual_sales - total_spent;
+    const actual_sales    = parseFloat(salesRow[0].total_sales);
+    const cash_sales      = parseFloat(salesRow[0].cash_sales);
+    const upi_sales       = parseFloat(salesRow[0].upi_sales);
+    const total_bills     = salesRow[0].total_bills;
+    const spent_expenses  = parseFloat(spentRow[0].total_spent);
+    const employee_advance_total = parseFloat(advanceRow[0]?.total_advance || 0);
+    const advance_list    = advanceRow[0]?.advance_list || [];
 
-    const avg_daily_sales   = days_elapsed > 0 ? actual_sales / days_elapsed : 0;
-    const projected_sales   = avg_daily_sales * total_days;
-    const avg_daily_expense = days_elapsed > 0 ? total_spent / days_elapsed : 0;
+    // Total expenses = daily spent + employee advances
+    const total_expenses  = spent_expenses + employee_advance_total;
+    const in_hand         = actual_sales - total_expenses;   // actual cash in hand
+    const net_profit      = in_hand;
 
-    const total_budget = items.reduce((s, i) => s + parseFloat(i.target_amount || 0), 0);
+    // ── Sales pace metrics ────────────────────────────
+    const avg_daily_sales    = days_elapsed > 0 ? actual_sales / days_elapsed : 0;
+    const projected_sales    = avg_daily_sales * total_days;
+    const remaining_sales    = Math.max(0, parseFloat(sales_target || 0) - actual_sales);
+    const daily_sales_needed = days_left > 0 ? remaining_sales / days_left : 0;
+
+    // ── Expense pace metrics ──────────────────────────
+    const total_budget       = items.reduce((s, i) => s + parseFloat(i.target_amount || 0), 0);
+    const avg_daily_expense  = days_elapsed > 0 ? total_expenses / days_elapsed : 0;
 
     res.json({
       target,
+      // Sales
       actual_sales,
       cash_sales,
       upi_sales,
       total_bills,
-      total_spent,
-      net_profit,
-      total_budget,
+      sales_target: parseFloat(sales_target || 0),
+      remaining_sales,
       avg_daily_sales,
       projected_sales,
+      daily_sales_needed,
+      // Expenses
+      spent_expenses,
+      employee_advance_total,
+      advance_list,
+      total_expenses,
+      total_budget,
       avg_daily_expense,
+      // Summary
+      in_hand,
+      net_profit,
+      // Time
       days_elapsed,
       days_left,
       total_days,
