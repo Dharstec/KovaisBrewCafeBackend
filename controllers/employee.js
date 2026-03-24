@@ -68,11 +68,8 @@ exports.getEmployees = async (req, res) => {
 };
 
 
-exports.createEmployee = async (req,res)=>{
-  res.json(await DB.PostgresInsert("employees", req.body));
-};
-
-exports.updateEmployee = async (req,res)=>{
-  await DB.PostgresUpdate("employees", req.body, {id:req.params.id});
-  res.json({message:"Updated"});
+exports.deleteEmployee = async (req, res) => {
+  const { id } = req.params;
+  await DB.PostgresAny(`DELETE FROM employees WHERE id = $1`, [id]);
+  res.json({ message: "Employee deleted successfully" });
 };
