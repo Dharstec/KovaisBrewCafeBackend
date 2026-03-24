@@ -211,17 +211,36 @@ const getTargetAchievement = async (req, res) => {
       WHERE ea.advance_date::date BETWEEN $1::date AND $2::date
     `, [start_date, end_date]);
 
-    // ── Per item: actual from spent by keyword ─────────
+    // ── Per item: actual from ALL sources ─────────────
+    // Sources: spent (by reason keyword) + employee_advance (by employee name keyword)
     const itemActuals = {};
+    const itemBreakdown = {};
+
     for (const item of items) {
       const kw = `%${item.item_name.toLowerCase()}%`;
-      const r = await DB.PostgresAny(`
+
+      // 1. From spent table (reason keyword match)
+      const spentMatch = await DB.PostgresAny(`
         SELECT COALESCE(SUM(amount), 0) AS actual
         FROM spent
         WHERE LOWER(reason) LIKE $1
           AND date::date BETWEEN $2::date AND $3::date
       `, [kw, start_date, end_date]);
-      itemActuals[item.id] = parseFloat(r[0]?.actual || 0);
+
+      // 2. From employee_advance (employee name keyword match)
+      const advanceMatch = await DB.PostgresAny(`
+        SELECT COALESCE(SUM(ea.amount), 0) AS actual
+        FROM employee_advance ea
+        JOIN employees e ON e.id = ea.employee_id
+        WHERE LOWER(e.name) LIKE $1
+          AND ea.advance_date::date BETWEEN $2::date AND $3::date
+      `, [kw, start_date, end_date]);
+
+      const fromSpent   = parseFloat(spentMatch[0]?.actual   || 0);
+      const fromAdvance = parseFloat(advanceMatch[0]?.actual || 0);
+
+      itemActuals[item.id] = fromSpent + fromAdvance;
+      itemBreakdown[item.id] = { fromSpent, fromAdvance };
     }
 
     // ── Days calculation ──────────────────────────────
@@ -281,7 +300,8 @@ const getTargetAchievement = async (req, res) => {
       days_elapsed,
       days_left,
       total_days,
-      item_actuals: itemActuals
+      item_actuals: itemActuals,
+      item_breakdown: itemBreakdown
     });
   } catch (err) {
     console.error('getTargetAchievement:', err.message);
