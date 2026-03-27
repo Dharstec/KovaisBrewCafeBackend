@@ -125,33 +125,46 @@ exports.getHourlyItemSales = async (req, res) => {
   }
 };
 
-/* ─────────────────────────────────────────
-   GET /dashboard/sales_chart?date=YYYY-MM-DD
-   ───────────────────────────────────────── */
+/* ──────────────────────────────────────────────────
+   GET /dashboard/sales_chart
+     ?startDate=YYYY-MM-DD&endDate=YYYY-MM-DD  (range)
+     ?date=YYYY-MM-DD                          (single day)
+   ────────────────────────────────────────────────── */
 exports.getItemSalesChart = async (req, res) => {
   try {
-    const date = resolveDate(req);
-    const dateExpr = date ? `$1::date` : `CURRENT_DATE`;
-    const params   = date ? [date] : [];
+    const dateRx  = /^\d{4}-\d{2}-\d{2}$/;
+    const todayStr = new Date().toISOString().slice(0, 10);
+
+    let whereExpr, params;
+    if (req.query.startDate && req.query.endDate &&
+        dateRx.test(req.query.startDate) && dateRx.test(req.query.endDate)) {
+      whereExpr = `DATE(b.created_at) BETWEEN $1::date AND $2::date`;
+      params    = [req.query.startDate, req.query.endDate];
+    } else {
+      const date = resolveDate(req) || todayStr;
+      whereExpr = `DATE(b.created_at) = $1::date`;
+      params    = [date];
+    }
 
     const data = await DB.PostgresAny(`
       SELECT
         COALESCE(p.name, bi.product_name) AS item_name,
-        SUM(bi.qty)                        AS total_count,
+        SUM(bi.qty)::int                   AS total_count,
         SUM(bi.qty * bi.price)             AS total_revenue
       FROM bill_items bi
       JOIN bills b ON b.id = bi.bill_id
       LEFT JOIN products p ON p.id = bi.product_id
       WHERE b.status = 'COMPLETED'
-        AND DATE(b.created_at) = ${dateExpr}
+        AND ${whereExpr}
       GROUP BY item_name
       ORDER BY total_count DESC
+      LIMIT 15
     `, params);
 
     res.json(data);
   } catch (err) {
-    console.error(err);
-    res.status(500).json({ message: "Item chart failed" });
+    console.error('Item chart failed:', err);
+    res.status(500).json({ message: 'Item chart failed' });
   }
 };
 
