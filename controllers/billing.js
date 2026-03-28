@@ -348,32 +348,23 @@ exports.cancelBill = async (req, res) => {
     /* Restore all reserved stock */
     await _restoreStock(client, billId);
 
-    /* Write RETURN logs */
+    /* Write RETURN logs against stock_items */
     const items = await client.query(
-      `SELECT bi.product_id, bi.qty, p.track_stock
-       FROM bill_items bi
-       JOIN products p ON p.id = bi.product_id
-       WHERE bi.bill_id = $1`,
+      `SELECT bi.product_id, bi.qty FROM bill_items bi WHERE bi.bill_id = $1`,
       [billId]
     );
     for (const i of items.rows) {
-      if (i.track_stock) {
-        await client.query(
-          `INSERT INTO stock_logs (product_id, change_qty, action, reference_id, note)
-           VALUES ($1, $2, 'RETURN', $3, $4)`,
-          [i.product_id, i.qty, billId, `Bill #${billId} cancelled`]
-        );
-      }
       const recipes = await client.query(
-        `SELECT raw_product_id, used_qty FROM product_recipes WHERE sale_product_id = $1`,
+        `SELECT stock_item_id, used_qty FROM product_recipes
+         WHERE sale_product_id = $1 AND stock_item_id IS NOT NULL`,
         [i.product_id]
       );
       for (const r of recipes.rows) {
         const restored = Number(r.used_qty) * Number(i.qty);
         await client.query(
-          `INSERT INTO stock_logs (product_id, change_qty, action, reference_id, note)
+          `INSERT INTO stock_logs (stock_item_id, change_qty, action, reference_id, note)
            VALUES ($1, $2, 'RETURN', $3, $4)`,
-          [r.raw_product_id, restored, billId, `Bill #${billId} cancelled — recipe restore`]
+          [r.stock_item_id, restored, billId, `Bill #${billId} cancelled — recipe restore`]
         );
       }
     }
@@ -530,29 +521,8 @@ exports.syncOfflineBill = async (req, res) => {
       );
     }
 
-    /* Deduct stock (best-effort for offline; allow negative) */
-    for (const i of items) {
-      const product = await client.query(
-        `SELECT track_stock FROM products WHERE id = $1`,
-        [i.productId]
-      );
-      if (product.rows[0]?.track_stock) {
-        await client.query(
-          `UPDATE products SET current_qty = current_qty - $1 WHERE id = $2`,
-          [i.qty, i.productId]
-        );
-      }
-      const recipes = await client.query(
-        `SELECT raw_product_id, used_qty FROM product_recipes WHERE sale_product_id = $1`,
-        [i.productId]
-      );
-      for (const r of recipes.rows) {
-        await client.query(
-          `UPDATE products SET current_qty = current_qty - $1 WHERE id = $2`,
-          [r.used_qty * i.qty, r.raw_product_id]
-        );
-      }
-    }
+    /* Deduct stock via stock_items (best-effort for offline; allow negative) */
+    await _deductStock(client, items, billId);
 
     /* Write stock_logs (bill is already COMPLETED) */
     await _writeCompletionLogs(client, billId);

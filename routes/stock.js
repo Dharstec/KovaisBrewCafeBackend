@@ -7,7 +7,8 @@ router.get("/stock",               verifyToken, c.getStock);             // curr
 router.get("/stock_dropdown",      verifyToken, c.getDropDownStock);     // for recipe builder
 
 /* ── Add stock (purchase entry) ── */
-router.post("/stock/add",          verifyToken, c.addStockEntry);        // Add button — qty + price + expiry
+router.post("/stock/add",          verifyToken, c.addStockEntry);        // single batch — qty + price + expiry
+router.post("/stock/add-bulk",     verifyToken, c.addStockEntryBulk);    // multiple batches, different expiry dates
 
 /* ── Stock entries (purchase history / price tracking) ── */
 router.get("/stock/entries",       verifyToken, c.getStockEntries);      // all entries (?stock_item_id=X)

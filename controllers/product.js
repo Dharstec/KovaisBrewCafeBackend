@@ -265,7 +265,8 @@ exports.getRecipeByProduct = async (req, res) => {
       SELECT
         pr.id,
         pr.stock_item_id,
-        si.name       AS stock_item_name,
+        pr.stock_item_id  AS raw_product_id,
+        si.name           AS stock_item_name,
         si.base_unit,
         si.unit_label,
         pr.used_qty
@@ -300,11 +301,13 @@ exports.saveRecipe = async (req, res) => {
     );
 
     for (const item of items) {
-      if (!item.stock_item_id || !item.used_qty) continue;
+      // Accept raw_product_id (frontend field name) or stock_item_id (new field name)
+      const stock_item_id = item.stock_item_id || item.raw_product_id;
+      if (!stock_item_id || !item.used_qty) continue;
       await DB.PostgresInsert("product_recipes", {
         sale_product_id,
-        stock_item_id:  item.stock_item_id,
-        used_qty:       Number(item.used_qty)
+        stock_item_id,
+        used_qty: Number(item.used_qty)
       });
     }
 
