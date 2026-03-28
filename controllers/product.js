@@ -1,8 +1,17 @@
 const DB = require("../middleware/dbFunctions");
 
 /* =========================================================
-   BILLING PRODUCT LIST (SELLABLE ONLY)
+   PRODUCTS = MENU ITEMS only
+   (Latte, Tea, Snacks, Coke, etc.)
+
+   NO stock fields here.
+   Raw materials live in stock_items table.
    ========================================================= */
+
+
+/* ─────────────────────────────────────────────────────────
+   BILLING PRODUCT LIST  (lean, for billing screen)
+   ───────────────────────────────────────────────────────── */
 exports.getAllProductsBilling = async (req, res) => {
   try {
     const { search, category_id } = req.query;
@@ -15,32 +24,24 @@ exports.getAllProductsBilling = async (req, res) => {
         p.image_url,
         p.category_id,
         p.is_manual_price,
-        p.track_stock,
-        p.current_qty,
-        p.min_qty,
         c.name AS category
       FROM products p
       JOIN categories c ON c.id = p.category_id
-      WHERE p.is_active = true
+      WHERE p.is_active   = true
         AND p.is_sellable = true`;
 
     const params = [];
-
     if (search) {
       params.push(`%${search.toLowerCase()}%`);
       query += ` AND LOWER(p.name) LIKE $${params.length}`;
     }
-
     if (category_id) {
       params.push(category_id);
       query += ` AND p.category_id = $${params.length}`;
     }
+    query += ` ORDER BY c.name, p.name`;
 
-    query += ` ORDER BY p.name ASC`;
-
-    const products = await DB.PostgresAny(query, params);
-    res.json(products);
-
+    res.json(await DB.PostgresAny(query, params));
   } catch (err) {
     console.error("Billing products error:", err);
     res.status(500).json({ msg: "Server error" });
@@ -48,16 +49,16 @@ exports.getAllProductsBilling = async (req, res) => {
 };
 
 
-/* =========================================================
-   GET ALL PRODUCTS (ADMIN PAGE)
-   ========================================================= */
+/* ─────────────────────────────────────────────────────────
+   LIST ALL PRODUCTS  (admin page, paginated)
+   ───────────────────────────────────────────────────────── */
 exports.getAllProducts = async (req, res) => {
   try {
     const { search = '', category_id, page = 1, limit = 10 } = req.query;
 
-    const pageNo = Number(page);
+    const pageNo   = Number(page);
     const pageSize = Number(limit);
-    const offset = (pageNo - 1) * pageSize;
+    const offset   = (pageNo - 1) * pageSize;
 
     let where = `WHERE p.is_active = true`;
     const params = [];
@@ -66,13 +67,12 @@ exports.getAllProducts = async (req, res) => {
       params.push(`%${search.toLowerCase()}%`);
       where += ` AND LOWER(p.name) LIKE $${params.length}`;
     }
-
     if (category_id) {
       params.push(category_id);
       where += ` AND p.category_id = $${params.length}`;
     }
 
-    const dataQuery = `
+    const products = await DB.PostgresAny(`
       SELECT
         p.id,
         p.name,
@@ -80,263 +80,200 @@ exports.getAllProducts = async (req, res) => {
         p.image_url,
         p.category_id,
         p.is_sellable,
-        p.track_stock,
-        p.current_qty,
-        p.min_qty,
-        p.base_unit,
-        p.unit_label,
-        p.unit_value,
         p.is_manual_price,
         p.is_active,
         c.name AS category_name
       FROM products p
       LEFT JOIN categories c ON c.id = p.category_id
       ${where}
-      ORDER BY p.name
-      LIMIT $${params.length + 1}
-      OFFSET $${params.length + 2}
-    `;
+      ORDER BY c.name, p.name
+      LIMIT $${params.length + 1} OFFSET $${params.length + 2}
+    `, [...params, pageSize, offset]);
 
-    const countQuery = `
-      SELECT COUNT(*) AS total
-      FROM products p
-      ${where}
-    `;
-
-    const products = await DB.PostgresAny(
-      dataQuery,
-      [...params, pageSize, offset]
+    const count = await DB.PostgresAny(
+      `SELECT COUNT(*) AS total FROM products p ${where}`,
+      params
     );
 
-    const count = await DB.PostgresAny(countQuery, params);
-    const total = Number(count[0].total);
-
     res.json({
-      data: products,
-      page: pageNo,
-      limit: pageSize,
-      total,
-      totalPages: Math.ceil(total / pageSize)
+      data:       products,
+      page:       pageNo,
+      limit:      pageSize,
+      total:      Number(count[0].total),
+      totalPages: Math.ceil(Number(count[0].total) / pageSize)
     });
-
   } catch (err) {
     console.error("Get products error:", err);
     res.status(500).json({ msg: "Server error" });
   }
 };
 
-/* =========================================================
+
+/* ─────────────────────────────────────────────────────────
    GET PRODUCT BY ID
-   ========================================================= */
+   ───────────────────────────────────────────────────────── */
 exports.getProductById = async (req, res) => {
   try {
-    const data = await DB.PostgresAny(
-      `SELECT * FROM products WHERE id = $1`,
-      [Number(req.params.id)]
-    );
+    const data = await DB.PostgresAny(`
+      SELECT p.id, p.name, p.price, p.image_url, p.category_id,
+             p.is_sellable, p.is_manual_price, p.is_active,
+             c.name AS category_name
+      FROM products p
+      LEFT JOIN categories c ON c.id = p.category_id
+      WHERE p.id = $1
+    `, [Number(req.params.id)]);
 
-    if (!data.length) {
-      return res.status(404).json({ msg: "Not found" });
-    }
-
+    if (!data.length) return res.status(404).json({ msg: "Product not found" });
     res.json(data[0]);
-
   } catch (err) {
     console.error("Get product error:", err);
     res.status(500).json({ msg: "Server error" });
   }
 };
 
-/* =========================================================
+
+/* ─────────────────────────────────────────────────────────
    CREATE PRODUCT
-   ========================================================= */
+   Required: name, category_id
+   Sellable products also need: price (or is_manual_price=true)
+   ───────────────────────────────────────────────────────── */
 exports.createProduct = async (req, res) => {
   try {
     const {
       name,
-      price,
       category_id,
+      price,
       image_url,
-
-      is_sellable = true,
-      track_stock = false,
-
-      base_unit,
-      unit_label,
-      unit_value,
-
-      current_qty,
-      min_qty,
-
+      is_sellable     = true,
       is_manual_price = false
     } = req.body;
 
     if (!name || !category_id) {
-      return res.status(400).json({ msg: "Name & category required" });
+      return res.status(400).json({ msg: "name and category_id are required" });
+    }
+    if (is_sellable && !is_manual_price && (price === undefined || price === null)) {
+      return res.status(400).json({ msg: "price required (or set is_manual_price=true)" });
     }
 
-    if (is_sellable && !is_manual_price && price === undefined) {
-      return res.status(400).json({ msg: "Price required" });
-    }
-
-    const payload = {
+    const product = await DB.PostgresInsert("products", {
       name,
-      category_id,
-      image_url: image_url || null,
-
-      is_sellable: !!is_sellable,
-      track_stock: !!track_stock,
-
-      price: is_manual_price ? 0 : Number(price),
+      category_id:     Number(category_id),
+      price:           is_manual_price ? 0 : Number(price),
+      image_url:       image_url || null,
+      is_sellable:     !!is_sellable,
       is_manual_price: !!is_manual_price,
-      is_active: true,
-
-      // ✅ REQUIRED BY DB
-      base_unit: base_unit || 'pcs',
-      unit_label: unit_label || 'piece',
-      unit_value: Number(unit_value) || 1
-    };
-
-    if (track_stock) {
-      payload.current_qty = Number(current_qty) || 0;
-      payload.min_qty = Number(min_qty) || 0;
-    } else {
-      payload.current_qty = 0;
-      payload.min_qty = 0;
-    }
-
-    const product = await DB.PostgresInsert("products", payload);
+      is_active:       true,
+      // keep required DB columns at safe defaults
+      base_unit:   'pcs',
+      unit_label:  'piece',
+      unit_value:  1,
+      track_stock: false,
+      current_qty: 0,
+      min_qty:     0
+    });
 
     res.status(201).json({ success: true, product });
-
   } catch (err) {
     console.error("Create product error:", err);
     res.status(500).json({ msg: err.message });
   }
 };
 
-/* =========================================================
+
+/* ─────────────────────────────────────────────────────────
    UPDATE PRODUCT
-   ========================================================= */
+   ───────────────────────────────────────────────────────── */
 exports.updateProduct = async (req, res) => {
   try {
-    const {
-      name,
-      price,
-      category_id,
-      image_url,
+    const { name, category_id, price, image_url, is_sellable, is_manual_price, is_active } = req.body;
 
-      is_sellable,
-      track_stock,
+    const payload = {};
+    if (name            !== undefined) payload.name            = name;
+    if (category_id     !== undefined) payload.category_id     = Number(category_id);
+    if (is_sellable     !== undefined) payload.is_sellable     = !!is_sellable;
+    if (is_manual_price !== undefined) payload.is_manual_price = !!is_manual_price;
+    if (is_active       !== undefined) payload.is_active       = !!is_active;
+    if (image_url       !== undefined) payload.image_url       = image_url || null;
+    if (price           !== undefined) payload.price           = Number(price);
 
-      current_qty,
-      min_qty,
-      base_unit,
-      unit_label,
-      unit_value,
+    payload.updated_at = new Date();
 
-      is_manual_price,
-      is_active
-    } = req.body;
-
-    const payload = {
-      name,
-      category_id,
-      image_url,
-
-      is_sellable: !!is_sellable,
-      track_stock: !!track_stock,
-
-      price: is_manual_price ? 0 : Number(price),
-      is_manual_price: !!is_manual_price,
-      is_active: !!is_active
-    };
-
-    if (track_stock) {
-      payload.current_qty = Number(current_qty) || 0;
-      payload.min_qty = Number(min_qty) || 0;
-      payload.base_unit = base_unit;
-      payload.unit_label = unit_label;
-      payload.unit_value = Number(unit_value) || 1;
-    } else {
-      payload.current_qty = 0;
-      payload.min_qty = 0;
+    if (Object.keys(payload).length === 1) {
+      return res.status(400).json({ msg: "No fields to update" });
     }
 
-    const updated = await DB.PostgresUpdate(
-      "products",
-      payload,
-      { id: Number(req.params.id) }
-    );
+    const updated = await DB.PostgresUpdate("products", payload, { id: Number(req.params.id) });
+    if (!updated) return res.status(404).json({ msg: "Product not found" });
 
-    if (!updated) {
-      return res.status(404).json({ msg: "Not found" });
-    }
-
-    res.json({ success: true, message: "Updated successfully" });
-
+    res.json({ success: true, message: "Product updated" });
   } catch (err) {
     console.error("Update product error:", err);
     res.status(500).json({ msg: "Update failed" });
   }
 };
 
-exports.getRecipeByProduct = async (req, res) => {
-  const data = await DB.PostgresAny(`
-    SELECT
-      pr.id,
-      pr.raw_product_id,
-      rp.name AS raw_name,
-      pr.used_qty,
-      rp.base_unit
-    FROM product_recipes pr
-    JOIN products rp ON rp.id = pr.raw_product_id
-    WHERE pr.sale_product_id = $1
-  `, [req.params.sale_product_id]);
 
-  res.json(data);
+/* ─────────────────────────────────────────────────────────
+   TOGGLE ACTIVE / INACTIVE
+   ───────────────────────────────────────────────────────── */
+exports.toggleProduct = async (req, res) => {
+  try {
+    const product = await DB.PostgresAny(
+      `SELECT id, is_active FROM products WHERE id = $1`,
+      [Number(req.params.id)]
+    );
+    if (!product.length) return res.status(404).json({ msg: "Product not found" });
+
+    const updated = await DB.PostgresUpdate(
+      "products",
+      { is_active: !product[0].is_active, updated_at: new Date() },
+      { id: Number(req.params.id) }
+    );
+    res.json({ success: true, is_active: updated.is_active });
+  } catch (err) {
+    console.error("Toggle product error:", err);
+    res.status(500).json({ msg: "Toggle failed" });
+  }
 };
 
 
-/* =========================================================
-   DELETE PRODUCT (SOFT DELETE)
-   ========================================================= */
+/* ─────────────────────────────────────────────────────────
+   DELETE PRODUCT  (soft delete)
+   ───────────────────────────────────────────────────────── */
 exports.deleteProduct = async (req, res) => {
   try {
-    const deleted = await DB.PostgresUpdate(
+    const updated = await DB.PostgresUpdate(
       "products",
-      { is_active: false },
+      { is_active: false, updated_at: new Date() },
       { id: Number(req.params.id) }
     );
-
-    if (!deleted) {
-      return res.status(404).json({ msg: "Not found" });
-    }
-
-    res.json({ success: true, message: "Deleted successfully" });
-
+    if (!updated) return res.status(404).json({ msg: "Product not found" });
+    res.json({ success: true, message: "Product deleted" });
   } catch (err) {
     console.error("Delete product error:", err);
     res.status(500).json({ msg: "Delete failed" });
   }
 };
 
+
+/* ─────────────────────────────────────────────────────────
+   RECIPE — get ingredients (links to stock_items)
+   ───────────────────────────────────────────────────────── */
 exports.getRecipeByProduct = async (req, res) => {
   try {
-    const { sale_product_id } = req.params;
-
     const data = await DB.PostgresAny(`
       SELECT
         pr.id,
-        pr.raw_product_id,
-        rp.name AS raw_name,
-        pr.used_qty,
-        rp.base_unit
+        pr.stock_item_id,
+        si.name       AS stock_item_name,
+        si.base_unit,
+        si.unit_label,
+        pr.used_qty
       FROM product_recipes pr
-      JOIN products rp ON rp.id = pr.raw_product_id
+      JOIN stock_items si ON si.id = pr.stock_item_id
       WHERE pr.sale_product_id = $1
-    `, [sale_product_id]);
-
+      ORDER BY si.name
+    `, [req.params.sale_product_id]);
     res.json(data);
   } catch (err) {
     console.error("Get recipe error:", err);
@@ -344,15 +281,17 @@ exports.getRecipeByProduct = async (req, res) => {
   }
 };
 
-/* =========================================================
-   SAVE / UPDATE PRODUCT RECIPE
-   ========================================================= */
+
+/* ─────────────────────────────────────────────────────────
+   RECIPE — save ingredients (replaces all rows)
+   items: [{ stock_item_id, used_qty }]
+   ───────────────────────────────────────────────────────── */
 exports.saveRecipe = async (req, res) => {
   try {
     const { sale_product_id, items } = req.body;
 
     if (!sale_product_id || !Array.isArray(items)) {
-      return res.status(400).json({ msg: "Invalid payload" });
+      return res.status(400).json({ msg: "sale_product_id and items[] required" });
     }
 
     await DB.PostgresAny(
@@ -361,33 +300,28 @@ exports.saveRecipe = async (req, res) => {
     );
 
     for (const item of items) {
-      if (!item.raw_product_id || !item.used_qty) continue;
-
+      if (!item.stock_item_id || !item.used_qty) continue;
       await DB.PostgresInsert("product_recipes", {
         sale_product_id,
-        raw_product_id: item.raw_product_id,
-        used_qty: Number(item.used_qty)
+        stock_item_id:  item.stock_item_id,
+        used_qty:       Number(item.used_qty)
       });
     }
 
-    res.json({ success: true, message: "Recipe saved successfully" });
-
+    res.json({ success: true, message: "Recipe saved" });
   } catch (err) {
     console.error("Save recipe error:", err);
     res.status(500).json({ msg: "Save failed" });
   }
 };
 
-/* =========================================================
-   DELETE SINGLE RECIPE ROW
-   ========================================================= */
+
+/* ─────────────────────────────────────────────────────────
+   RECIPE — delete single ingredient row
+   ───────────────────────────────────────────────────────── */
 exports.deleteRecipe = async (req, res) => {
   try {
-    await DB.PostgresAny(
-      `DELETE FROM product_recipes WHERE id = $1`,
-      [req.params.id]
-    );
-
+    await DB.PostgresAny(`DELETE FROM product_recipes WHERE id = $1`, [req.params.id]);
     res.json({ success: true });
   } catch (err) {
     console.error("Delete recipe error:", err);

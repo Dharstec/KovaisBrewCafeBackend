@@ -11,7 +11,8 @@ const stock = require("./routes/stock");
 const productRecipeRoutes = require("./routes/productRecipe");
 const coupons = require("./routes/coupon");
 const spend = require("./routes/spend");
-const targets = require("./routes/targets");
+const targets   = require("./routes/targets");
+const stockItem = require("./routes/stockItem");
 
 module.exports = function (app) {
     app.use("/", indexRoute);
@@ -28,6 +29,7 @@ module.exports = function (app) {
     app.use("/api", coupons);
     app.use("/api", spend);
     app.use("/api", targets);
+    app.use("/api", stockItem);
 }
 
 
