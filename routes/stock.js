@@ -11,7 +11,8 @@ router.post("/stock/add",          verifyToken, c.addStockEntry);        // sing
 router.post("/stock/add-bulk",     verifyToken, c.addStockEntryBulk);    // multiple batches, different expiry dates
 
 /* ── Stock entries (purchase history / price tracking) ── */
-router.get("/stock/entries",       verifyToken, c.getStockEntries);      // all entries (?stock_item_id=X)
+router.get("/stock/entries",          verifyToken, c.getStockEntries);      // all entries (?stock_item_id=X)
+router.patch("/stock/entries/:id",    verifyToken, c.updateStockEntry);     // update expiry/batch/supplier/notes
 router.get("/stock/price-history/:stock_item_id", verifyToken, c.getPriceHistory); // price trend for one item
 
 /* ── Expiry alerts ── */

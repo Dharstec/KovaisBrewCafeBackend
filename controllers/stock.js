@@ -374,6 +374,57 @@ exports.addStockEntryBulk = async (req, res) => {
 
 
 /* ─────────────────────────────────────────────────────────
+   UPDATE STOCK ENTRY  — patch expiry_date, batch_no, supplier, notes
+   PATCH /stock/entries/:id
+   ───────────────────────────────────────────────────────── */
+exports.updateStockEntry = async (req, res) => {
+  try {
+    const id = Number(req.params.id);
+    const { expiry_date, batch_no, supplier, notes } = req.body;
+
+    const fields = [];
+    const params = [];
+
+    if (expiry_date !== undefined) {
+      params.push(expiry_date || null);
+      fields.push(`expiry_date = $${params.length}`);
+    }
+    if (batch_no !== undefined) {
+      params.push(batch_no || null);
+      fields.push(`batch_no = $${params.length}`);
+    }
+    if (supplier !== undefined) {
+      params.push(supplier || null);
+      fields.push(`supplier = $${params.length}`);
+    }
+    if (notes !== undefined) {
+      params.push(notes || null);
+      fields.push(`notes = $${params.length}`);
+    }
+
+    if (!fields.length) {
+      return res.status(400).json({ message: "Nothing to update" });
+    }
+
+    params.push(id);
+    const result = await require("../middleware/dbFunctions").PostgresAny(`
+      UPDATE stock_entries
+      SET ${fields.join(', ')}
+      WHERE id = $${params.length}
+      RETURNING id, expiry_date, batch_no, supplier, notes
+    `, params);
+
+    if (!result.length) return res.status(404).json({ message: "Entry not found" });
+
+    res.json({ message: "Entry updated", entry: result[0] });
+  } catch (err) {
+    console.error("Update stock entry error:", err);
+    res.status(500).json({ message: "Failed to update entry" });
+  }
+};
+
+
+/* ─────────────────────────────────────────────────────────
    STOCK ENTRIES LIST  — NEW (purchase history + price tracking)
    ?product_id=X or ?stock_item_id=X
    ───────────────────────────────────────────────────────── */
