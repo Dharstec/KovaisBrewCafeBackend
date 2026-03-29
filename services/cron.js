@@ -9,7 +9,9 @@ const summary = require('./dailySummary');
 
 function start() {
   cron.schedule('0 23 * * *', async () => {
-    const groupId = process.env.WHATSAPP_GROUP_ID;
+    const raw     = (process.env.WHATSAPP_GROUP_ID || '').trim();
+    const match   = raw.match(/(\d+@g\.us)/);
+    const groupId = match ? match[1] : raw;
     if (!groupId) {
       console.log('[Cron] WHATSAPP_GROUP_ID not set — skipping');
       return;
