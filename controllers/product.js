@@ -82,7 +82,10 @@ exports.getAllProducts = async (req, res) => {
         p.is_sellable,
         p.is_manual_price,
         p.is_active,
-        c.name AS category_name
+        c.name AS category_name,
+        (SELECT COUNT(*) FROM product_recipes pr
+         WHERE pr.sale_product_id = p.id AND pr.stock_item_id IS NOT NULL
+        ) AS recipe_count
       FROM products p
       LEFT JOIN categories c ON c.id = p.category_id
       ${where}
@@ -162,14 +165,7 @@ exports.createProduct = async (req, res) => {
       image_url:       image_url || null,
       is_sellable:     !!is_sellable,
       is_manual_price: !!is_manual_price,
-      is_active:       true,
-      // keep required DB columns at safe defaults
-      base_unit:   'pcs',
-      unit_label:  'piece',
-      unit_value:  1,
-      track_stock: false,
-      current_qty: 0,
-      min_qty:     0
+      is_active:       true
     });
 
     res.status(201).json({ success: true, product });
@@ -265,14 +261,14 @@ exports.getRecipeByProduct = async (req, res) => {
       SELECT
         pr.id,
         pr.stock_item_id,
-        pr.stock_item_id  AS raw_product_id,
-        si.name           AS stock_item_name,
+        si.name  AS stock_item_name,
         si.base_unit,
         si.unit_label,
         pr.used_qty
       FROM product_recipes pr
       JOIN stock_items si ON si.id = pr.stock_item_id
       WHERE pr.sale_product_id = $1
+        AND pr.stock_item_id IS NOT NULL
       ORDER BY si.name
     `, [req.params.sale_product_id]);
     res.json(data);

@@ -407,11 +407,23 @@ exports.updateStockEntry = async (req, res) => {
     }
 
     params.push(id);
-    const result = await require("../middleware/dbFunctions").PostgresAny(`
+    const result = await DB.PostgresAny(`
       UPDATE stock_entries
       SET ${fields.join(', ')}
       WHERE id = $${params.length}
-      RETURNING id, expiry_date, batch_no, supplier, notes
+      RETURNING
+        id,
+        expiry_date,
+        batch_no,
+        supplier,
+        notes,
+        CASE
+          WHEN expiry_date IS NULL                                        THEN 'NO_EXPIRY'
+          WHEN expiry_date < CURRENT_DATE                                 THEN 'EXPIRED'
+          WHEN expiry_date <= CURRENT_DATE + INTERVAL '3 days'            THEN 'EXPIRING_TODAY'
+          WHEN expiry_date <= CURRENT_DATE + INTERVAL '7 days'            THEN 'EXPIRING_SOON'
+          ELSE                                                                 'OK'
+        END AS expiry_status
     `, params);
 
     if (!result.length) return res.status(404).json({ message: "Entry not found" });
