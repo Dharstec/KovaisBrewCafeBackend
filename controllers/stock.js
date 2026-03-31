@@ -122,8 +122,8 @@ exports.adjustStock = async (req, res) => {
     }
 
     await client.query(`
-      INSERT INTO stock_logs (stock_item_id, change_qty, action, reason, note)
-      VALUES ($1, $2, 'ADJUSTMENT', $3, $4)
+      INSERT INTO stock_logs (stock_item_id, change_qty, action, note)
+      VALUES ($1, $2, $3, $4)
     `, [stock_item_id, change_qty, logReason, note || null]);
 
     await client.query("COMMIT");
