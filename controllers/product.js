@@ -24,9 +24,21 @@ exports.getAllProductsBilling = async (req, res) => {
         p.image_url,
         p.category_id,
         p.is_manual_price,
-        c.name AS category
+        c.name AS category,
+        si.id                    AS stock_item_id,
+        ROUND(si.current_qty, 2) AS stock_qty,
+        si.min_qty               AS stock_min_qty,
+        si.base_unit             AS stock_unit
       FROM products p
       JOIN categories c ON c.id = p.category_id
+      LEFT JOIN LATERAL (
+        SELECT pr.stock_item_id
+        FROM   product_recipes pr
+        WHERE  pr.sale_product_id = p.id
+          AND  pr.stock_item_id IS NOT NULL
+        LIMIT  1
+      ) recipe ON true
+      LEFT JOIN stock_items si ON si.id = recipe.stock_item_id
       WHERE p.is_active   = true
         AND p.is_sellable = true`;
 
