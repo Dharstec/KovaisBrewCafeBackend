@@ -36,6 +36,8 @@ exports.getAllProductsBilling = async (req, res) => {
         FROM   product_recipes pr
         WHERE  pr.sale_product_id = p.id
           AND  pr.stock_item_id IS NOT NULL
+        HAVING COUNT(*) = 1
+        GROUP BY pr.stock_item_id
         LIMIT  1
       ) recipe ON true
       LEFT JOIN stock_items si ON si.id = recipe.stock_item_id
