@@ -97,7 +97,7 @@ exports.getAttendanceHistory = async (req, res) => {
       SELECT
         e.id   AS employee_id,
         e.name AS employee_name,
-        a.date,
+        TO_CHAR(a.date, 'YYYY-MM-DD') AS date,
         a.status,
         TO_CHAR(a.check_in,  'HH24:MI') AS check_in,
         TO_CHAR(a.check_out, 'HH24:MI') AS check_out
