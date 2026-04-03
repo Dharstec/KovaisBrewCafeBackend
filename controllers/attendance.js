@@ -58,7 +58,7 @@ exports.getAttendanceByDate = async (req, res) => {
     `SELECT
        e.id   AS employee_id,
        e.name,
-       COALESCE(a.status, 'A') AS status,
+       COALESCE(a.status, 'P') AS status,
        TO_CHAR(a.check_in,  'HH24:MI') AS check_in,
        TO_CHAR(a.check_out, 'HH24:MI') AS check_out
      FROM employees e
