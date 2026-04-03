@@ -39,11 +39,11 @@ exports.previewSalary = async (req, res) => {
 
     // 3. Advance totals per employee for the month
     const advRows = await DB.PostgresAny(
-      `SELECT employee_id, COALESCE(SUM(amount), 0) AS total_advance
+      `SELECT employee_id, COALESCE(SUM(amount::numeric), 0) AS total_advance
        FROM employee_advance
-       WHERE advance_date BETWEEN $1 AND $2
+       WHERE TO_CHAR(advance_date, 'YYYY-MM') = $1
        GROUP BY employee_id`,
-      [start, end]
+      [month]
     );
 
     // 4. Check already-finalized records
@@ -56,34 +56,40 @@ exports.previewSalary = async (req, res) => {
     // Build lookup maps
     const attMap = {};
     for (const r of attRows) {
-      if (!attMap[r.employee_id]) attMap[r.employee_id] = { P: 0, A: 0, H: 0, L: 0, HL: 0 };
+      if (!attMap[r.employee_id]) attMap[r.employee_id] = { P: 0, A: 0, H: 0, L: 0, HL: 0, WO: 0 };
       attMap[r.employee_id][r.status] = parseInt(r.cnt, 10);
     }
 
     const advMap = {};
-    for (const r of advRows) advMap[r.employee_id] = parseFloat(r.total_advance);
+    for (const r of advRows) advMap[r.employee_id] = Number(r.total_advance) || 0;
 
     const finalMap = {};
     for (const r of finalRows) finalMap[r.employee_id] = r;
 
     // 5. Calculate per employee
     const result = employees.map(emp => {
-      const att   = attMap[emp.id] || { P: 0, A: 0, H: 0, L: 0, HL: 0 };
+      const att   = attMap[emp.id] || { P: 0, A: 0, H: 0, L: 0, HL: 0, WO: 0 };
       const base  = parseFloat(emp.salary_amount) || 0;
       const adv   = advMap[emp.id] || 0;
       const final = finalMap[emp.id] || null;
 
-      const dailyRate      = totalDays > 0 ? base / totalDays : 0;
-      const presentDays    = att.P + att.L + (att.H * 0.5);   // late = full, half = 0.5
+      // Working days = calendar days − Weekly Off − Holidays (both are paid rest days)
+      const weeklyOffDays  = att.WO;
+      const holidayDays    = att.HL;
+      const workingDays    = totalDays - weeklyOffDays - holidayDays;
+
+      // Daily rate based on actual working days (not calendar days)
+      const dailyRate      = workingDays > 0 ? base / workingDays : 0;
+
+      const presentDays    = att.P + att.L + (att.H * 0.5); // late = full, half = 0.5
       const absentDays     = att.A;
       const halfDays       = att.H;
       const lateDays       = att.L;
-      const holidayDays    = att.HL;
 
-      const absentDeduction   = parseFloat((absentDays * dailyRate).toFixed(2));
-      const halfDeduction     = parseFloat((halfDays * (dailyRate * 0.5)).toFixed(2));
-      const advanceDeduction  = parseFloat(adv.toFixed(2));
-      const netPayable        = parseFloat(
+      const absentDeduction  = parseFloat((absentDays * dailyRate).toFixed(2));
+      const halfDeduction    = parseFloat((halfDays * (dailyRate * 0.5)).toFixed(2));
+      const advanceDeduction = parseFloat(adv.toFixed(2));
+      const netPayable       = parseFloat(
         Math.max(0, base - absentDeduction - halfDeduction - advanceDeduction).toFixed(2)
       );
 
@@ -92,6 +98,8 @@ exports.previewSalary = async (req, res) => {
         employee_name:     emp.name,
         base_salary:       base,
         total_days:        totalDays,
+        working_days:      workingDays,
+        weekly_off_days:   weeklyOffDays,
         daily_rate:        parseFloat(dailyRate.toFixed(2)),
         present_days:      presentDays,
         absent_days:       absentDays,
@@ -143,7 +151,7 @@ exports.finalizeSalary = async (req, res) => {
 
     const attMap = {};
     for (const r of attRows.rows) {
-      if (!attMap[r.employee_id]) attMap[r.employee_id] = { P: 0, A: 0, H: 0, L: 0, HL: 0 };
+      if (!attMap[r.employee_id]) attMap[r.employee_id] = { P: 0, A: 0, H: 0, L: 0, HL: 0, WO: 0 };
       attMap[r.employee_id][r.status] = parseInt(r.cnt, 10);
     }
 
@@ -154,15 +162,19 @@ exports.finalizeSalary = async (req, res) => {
       if (!empRow.rows.length) continue;
 
       const base  = parseFloat(empRow.rows[0].salary_amount) || 0;
-      const att   = attMap[e.employee_id] || { P: 0, A: 0, H: 0, L: 0, HL: 0 };
+      const att   = attMap[e.employee_id] || { P: 0, A: 0, H: 0, L: 0, HL: 0, WO: 0 };
       const adv   = parseFloat(e.advance_deduction) || 0;
 
-      const dailyRate       = totalDays > 0 ? base / totalDays : 0;
+      // Working days = calendar days − WO − HL
+      const weeklyOffDays  = att.WO;
+      const holidayDays    = att.HL;
+      const workingDays    = totalDays - weeklyOffDays - holidayDays;
+      const dailyRate      = workingDays > 0 ? base / workingDays : 0;
+
       const presentDays     = att.P + att.L + (att.H * 0.5);
       const absentDays      = att.A;
       const halfDays        = att.H;
       const lateDays        = att.L;
-      const holidayDays     = att.HL;
       const absentDeduction = parseFloat((absentDays * dailyRate).toFixed(2));
       const halfDeduction   = parseFloat((halfDays * (dailyRate * 0.5)).toFixed(2));
       const netPayable      = parseFloat(

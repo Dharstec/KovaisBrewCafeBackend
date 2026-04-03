@@ -1,8 +1,8 @@
 const DB = require("../middleware/dbFunctions");
 
-const VALID_STATUSES = ['P', 'A', 'H', 'L', 'HL'];
+const VALID_STATUSES = ['P', 'A', 'H', 'L', 'HL', 'WO'];
 // P  = Present   | A  = Absent  | H  = Half Day
-// L  = Late      | HL = Holiday
+// L  = Late      | HL = Holiday | WO = Weekly Off
 
 /* ─────────────────────────────────────────────
    MARK ATTENDANCE  (single day, batch upsert)
@@ -20,7 +20,7 @@ exports.markAttendance = async (req, res) => {
         throw new Error(`Invalid status '${r.status}'. Allowed: ${VALID_STATUSES.join(', ')}`);
 
       // Clear check_in/check_out for statuses that don't need them
-      const hasTime = ['P', 'H', 'L'].includes(r.status);
+      const hasTime = ['P', 'H', 'L'].includes(r.status);  // WO/HL/A have no times
 
       await client.query(
         `INSERT INTO attendance (employee_id, date, status, check_in, check_out)
@@ -135,12 +135,12 @@ exports.getAttendanceHistory = async (req, res) => {
 
     // Per-employee counts & attendance %
     const result = Object.values(grouped).map(emp => {
-      const counts = { P: 0, A: 0, H: 0, L: 0, HL: 0 };
+      const counts = { P: 0, A: 0, H: 0, L: 0, HL: 0, WO: 0 };
       for (const r of emp.records) {
         if (counts.hasOwnProperty(r.status)) counts[r.status]++;
       }
-      // Work days = all days except Holiday
-      const workDays   = emp.records.filter(r => r.status !== 'HL').length;
+      // Work days = excludes Weekly Off and Holiday (both are paid rest days)
+      const workDays   = emp.records.filter(r => r.status !== 'HL' && r.status !== 'WO').length;
       // Half-day counts as 0.5, Late still counts as 1
       const presentVal = counts.P + (counts.H * 0.5) + counts.L;
       const attendance_pct = workDays > 0 ? Math.round((presentVal / workDays) * 100) : 0;
