@@ -7,10 +7,14 @@ const DB = require("../middleware/dbFunctions");
    ========================================================= */
 async function _deductStock(client, items, billId) {
   for (const i of items) {
-    /* RECIPE stock — deduct from stock_items via stock_item_id */
+    /* RECIPE stock — deduct from stock_items.
+       Fallback to raw_product_id for legacy recipes saved before the
+       stock_items migration (where stock_item_id may still be NULL). */
     const recipes = await client.query(
-      `SELECT stock_item_id, used_qty FROM product_recipes
-       WHERE sale_product_id = $1 AND stock_item_id IS NOT NULL`,
+      `SELECT COALESCE(stock_item_id, raw_product_id) AS stock_item_id, used_qty
+       FROM product_recipes
+       WHERE sale_product_id = $1
+         AND COALESCE(stock_item_id, raw_product_id) IS NOT NULL`,
       [i.productId]
     );
 
@@ -29,12 +33,14 @@ async function _deductStock(client, items, billId) {
    Called inside an already-open transaction (client)
    ========================================================= */
 async function _restoreStock(client, billId) {
-  /* RECIPE stock — restore to stock_items */
+  /* RECIPE stock — restore to stock_items (legacy-safe) */
   const recipes = await client.query(
-    `SELECT pr.stock_item_id, pr.used_qty, bi.qty
+    `SELECT COALESCE(pr.stock_item_id, pr.raw_product_id) AS stock_item_id,
+            pr.used_qty, bi.qty
      FROM bill_items bi
      JOIN product_recipes pr ON pr.sale_product_id = bi.product_id
-     WHERE bi.bill_id = $1 AND pr.stock_item_id IS NOT NULL`,
+     WHERE bi.bill_id = $1
+       AND COALESCE(pr.stock_item_id, pr.raw_product_id) IS NOT NULL`,
     [billId]
   );
 
@@ -60,8 +66,10 @@ async function _writeCompletionLogs(client, billId) {
   for (const i of items.rows) {
     /* RECIPE USAGE logs — write to stock_logs against stock_item_id */
     const recipes = await client.query(
-      `SELECT stock_item_id, used_qty FROM product_recipes
-       WHERE sale_product_id = $1 AND stock_item_id IS NOT NULL`,
+      `SELECT COALESCE(stock_item_id, raw_product_id) AS stock_item_id, used_qty
+       FROM product_recipes
+       WHERE sale_product_id = $1
+         AND COALESCE(stock_item_id, raw_product_id) IS NOT NULL`,
       [i.product_id]
     );
     for (const r of recipes.rows) {
@@ -110,10 +118,12 @@ exports.createBill = async (req, res) => {
         throw { code: "INVALID_ITEM_DATA", message: "Invalid item data", product: i.name };
       }
 
-      /* recipe stock check — against stock_items table */
+      /* recipe stock check — against stock_items table (legacy-safe) */
       const recipes = await client.query(
-        `SELECT stock_item_id, used_qty FROM product_recipes
-         WHERE sale_product_id = $1 AND stock_item_id IS NOT NULL`,
+        `SELECT COALESCE(stock_item_id, raw_product_id) AS stock_item_id, used_qty
+         FROM product_recipes
+         WHERE sale_product_id = $1
+           AND COALESCE(stock_item_id, raw_product_id) IS NOT NULL`,
         [i.productId]
       );
       for (const r of recipes.rows) {
@@ -215,8 +225,10 @@ exports.updateBill = async (req, res) => {
       }
 
       const recipes = await client.query(
-        `SELECT stock_item_id, used_qty FROM product_recipes
-         WHERE sale_product_id = $1 AND stock_item_id IS NOT NULL`,
+        `SELECT COALESCE(stock_item_id, raw_product_id) AS stock_item_id, used_qty
+         FROM product_recipes
+         WHERE sale_product_id = $1
+           AND COALESCE(stock_item_id, raw_product_id) IS NOT NULL`,
         [i.productId]
       );
       for (const r of recipes.rows) {
@@ -355,8 +367,10 @@ exports.cancelBill = async (req, res) => {
     );
     for (const i of items.rows) {
       const recipes = await client.query(
-        `SELECT stock_item_id, used_qty FROM product_recipes
-         WHERE sale_product_id = $1 AND stock_item_id IS NOT NULL`,
+        `SELECT COALESCE(stock_item_id, raw_product_id) AS stock_item_id, used_qty
+         FROM product_recipes
+         WHERE sale_product_id = $1
+           AND COALESCE(stock_item_id, raw_product_id) IS NOT NULL`,
         [i.product_id]
       );
       for (const r of recipes.rows) {
