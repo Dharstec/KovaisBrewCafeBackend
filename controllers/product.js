@@ -24,7 +24,14 @@ exports.getAllProductsBilling = async (req, res) => {
         p.image_url,
         p.category_id,
         p.is_manual_price,
-        c.name AS category
+        c.name AS category,
+        EXISTS(SELECT 1 FROM product_recipes pr WHERE pr.sale_product_id = p.id) AS has_recipe,
+        (
+          SELECT MIN(FLOOR(si.current_qty / NULLIF(pr.used_qty, 0)))
+          FROM product_recipes pr
+          JOIN stock_items si ON si.id = pr.stock_item_id
+          WHERE pr.sale_product_id = p.id
+        ) AS servings_possible
       FROM products p
       JOIN categories c ON c.id = p.category_id
       WHERE p.is_active   = true
@@ -264,7 +271,9 @@ exports.getRecipeByProduct = async (req, res) => {
         si.name  AS stock_item_name,
         si.base_unit,
         si.unit_label,
-        pr.used_qty
+        pr.used_qty,
+        ROUND(si.current_qty, 2) AS current_qty,
+        FLOOR(si.current_qty / NULLIF(pr.used_qty, 0)) AS servings_from_this
       FROM product_recipes pr
       JOIN stock_items si ON si.id = pr.stock_item_id
       WHERE pr.sale_product_id = $1
