@@ -26,7 +26,9 @@ exports.getDashboardSummary = async (req, res) => {
         COUNT(*)                        AS total_bills,
         COALESCE(SUM(grand_total), 0)   AS total_sales,
         COALESCE(SUM(grand_total) FILTER (WHERE payment_mode = 'CASH'), 0) AS cash_total,
-        COALESCE(SUM(grand_total) FILTER (WHERE payment_mode = 'UPI'),  0) AS upi_total
+        COALESCE(SUM(grand_total) FILTER (WHERE payment_mode = 'UPI'),  0) AS upi_total,
+        COALESCE(SUM(grand_total) FILTER (WHERE platform = 'zomato'), 0)   AS zomato_total,
+        COALESCE(SUM(grand_total) FILTER (WHERE platform = 'swiggy'), 0)   AS swiggy_total
       FROM bills
       WHERE status = 'COMPLETED'
         AND DATE(created_at) = ${dateExpr}
@@ -68,6 +70,8 @@ exports.getDashboardSummary = async (req, res) => {
       today_bills:   Number(sales[0].total_bills),
       cash_total:    Number(sales[0].cash_total),
       upi_total:     Number(sales[0].upi_total),
+      zomato_total:  Number(sales[0].zomato_total),
+      swiggy_total:  Number(sales[0].swiggy_total),
       pending_bills: Number(pendingBills[0].pending),
 
       products:   Number(products[0].count),
