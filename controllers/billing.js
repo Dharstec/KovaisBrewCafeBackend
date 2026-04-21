@@ -461,7 +461,7 @@ exports.pendingBills = async (req, res) => {
    ========================================================= */
 exports.completedBills = async (req, res) => {
   try {
-    const { start_date, end_date, page = 1, limit = 6 } = req.query;
+    const { start_date, end_date, page = 1, limit = 20, platform } = req.query;
 
     const pageNo   = Number(page);
     const pageSize = Number(limit);
@@ -473,6 +473,13 @@ exports.completedBills = async (req, res) => {
     if (start_date && end_date) {
       params.push(start_date, end_date);
       where += ` AND DATE(created_at) BETWEEN $1 AND $2`;
+    }
+
+    if (platform === 'regular') {
+      where += ` AND (platform IS NULL OR platform = '')`;
+    } else if (platform === 'zomato' || platform === 'swiggy') {
+      params.push(platform);
+      where += ` AND platform = $${params.length}`;
     }
 
     const bills = await DB.PostgresAny(
@@ -499,6 +506,8 @@ exports.completedBills = async (req, res) => {
       `SELECT
          SUM(CASE WHEN payment_mode = 'CASH' THEN grand_total ELSE 0 END) AS cash_total,
          SUM(CASE WHEN payment_mode = 'UPI'  THEN grand_total ELSE 0 END) AS upi_total,
+         SUM(CASE WHEN platform = 'zomato'   THEN grand_total ELSE 0 END) AS zomato_total,
+         SUM(CASE WHEN platform = 'swiggy'   THEN grand_total ELSE 0 END) AS swiggy_total,
          SUM(grand_total) AS grand_total
        FROM bills ${where}`,
       params
