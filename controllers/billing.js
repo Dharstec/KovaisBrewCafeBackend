@@ -150,7 +150,7 @@ exports.createBill = async (req, res) => {
   const client = await DB.getClient();
 
   try {
-    const { items, customer_name, local_id } = req.body;
+    const { items, customer_name, local_id, platform } = req.body;
 
     if (!Array.isArray(items) || !items.length) {
       return res.status(400).json({ code: "INVALID_ITEMS", message: "Items array required" });
@@ -204,9 +204,9 @@ exports.createBill = async (req, res) => {
 
     /* 2️⃣  CREATE BILL */
     const billRes = await client.query(
-      `INSERT INTO bills (customer_name, status, grand_total, local_id)
-       VALUES ($1, 'PENDING', 0, $2) RETURNING id`,
-      [customer_name, local_id || null]
+      `INSERT INTO bills (customer_name, status, grand_total, local_id, platform)
+       VALUES ($1, 'PENDING', 0, $2, $3) RETURNING id`,
+      [customer_name, local_id || null, platform || null]
     );
     const billId = billRes.rows[0].id;
     let total = 0;
@@ -526,7 +526,7 @@ exports.syncOfflineBill = async (req, res) => {
   try {
     const {
       items, customer_name, payment_mode,
-      grand_total, discount_amount = 0, local_id
+      grand_total, discount_amount = 0, local_id, platform
     } = req.body;
 
     if (!Array.isArray(items) || !items.length) {
@@ -549,14 +549,15 @@ exports.syncOfflineBill = async (req, res) => {
 
     /* Insert as COMPLETED directly */
     const billRes = await client.query(
-      `INSERT INTO bills (customer_name, status, grand_total, discount_amount, payment_mode, local_id)
-       VALUES ($1,'COMPLETED',$2,$3,$4,$5) RETURNING id`,
+      `INSERT INTO bills (customer_name, status, grand_total, discount_amount, payment_mode, local_id, platform)
+       VALUES ($1,'COMPLETED',$2,$3,$4,$5,$6) RETURNING id`,
       [
         customer_name,
         Number(grand_total) || 0,
         Number(discount_amount) || 0,
         payment_mode,
-        local_id || null
+        local_id || null,
+        platform || null
       ]
     );
     const billId = billRes.rows[0].id;
