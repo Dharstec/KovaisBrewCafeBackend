@@ -16,6 +16,7 @@ router.patch("/stock/entries/:id",    verifyToken, c.updateStockEntry);     // u
 router.get("/stock/price-history/:stock_item_id", verifyToken, c.getPriceHistory); // price trend for one item
 
 /* ── Expiry alerts ── */
+router.get("/stock/alerts",        verifyToken, c.getAlerts);            // expiring 30d + low stock (all users)
 router.get("/stock/expiring",      verifyToken, c.getExpiringEntries);   // ?days=7
 
 /* ── Manual adjustment ── */

@@ -51,25 +51,25 @@ exports.getAllStockItems = async (req, res) => {
         si.current_qty <= si.min_qty         AS is_low_stock,
 
         -- count of active batches
-        (SELECT COUNT(*) FROM stock_batches sb
-          WHERE sb.stock_item_id = si.id AND sb.remaining_qty > 0
+        (SELECT COUNT(*) FROM stock_entries se
+          WHERE se.stock_item_id = si.id AND se.remaining_qty > 0
         )                                    AS active_batch_count,
 
         -- batches expiring within 7 days
-        (SELECT COUNT(*) FROM stock_batches sb
-          WHERE sb.stock_item_id = si.id
-            AND sb.remaining_qty > 0
-            AND sb.expiry_date IS NOT NULL
-            AND sb.expiry_date <= CURRENT_DATE + INTERVAL '7 days'
+        (SELECT COUNT(*) FROM stock_entries se
+          WHERE se.stock_item_id = si.id
+            AND se.remaining_qty > 0
+            AND se.expiry_date IS NOT NULL
+            AND se.expiry_date <= CURRENT_DATE + INTERVAL '7 days'
         )                                    AS expiring_batch_count,
 
         -- any expired batch still holding stock
         EXISTS (
-          SELECT 1 FROM stock_batches sb
-          WHERE sb.stock_item_id = si.id
-            AND sb.remaining_qty > 0
-            AND sb.expiry_date IS NOT NULL
-            AND sb.expiry_date < CURRENT_DATE
+          SELECT 1 FROM stock_entries se
+          WHERE se.stock_item_id = si.id
+            AND se.remaining_qty > 0
+            AND se.expiry_date IS NOT NULL
+            AND se.expiry_date < CURRENT_DATE
         )                                    AS has_expired_stock,
 
         si.is_active,
@@ -127,8 +127,8 @@ exports.getStockItemById = async (req, res) => {
     const batches = await DB.PostgresAny(`
       SELECT
         id, batch_no, supplier, purchase_date, expiry_date,
-        received_unit, received_qty, base_qty, remaining_qty,
-        cost_price, notes,
+        unit AS received_unit, qty AS received_qty, base_qty, remaining_qty,
+        purchase_price AS cost_price, notes,
         (expiry_date - CURRENT_DATE) AS days_to_expiry,
         CASE
           WHEN expiry_date IS NULL                                         THEN 'NO_EXPIRY'
@@ -137,7 +137,7 @@ exports.getStockItemById = async (req, res) => {
           WHEN expiry_date <= CURRENT_DATE + INTERVAL '7 days'             THEN 'EXPIRING_SOON'
           ELSE                                                                  'OK'
         END AS expiry_status
-      FROM stock_batches
+      FROM stock_entries
       WHERE stock_item_id = $1
       ORDER BY created_at DESC
       LIMIT 10
@@ -254,7 +254,7 @@ exports.deleteStockItem = async (req, res) => {
 
     // Block delete if batches still have stock
     const active = await DB.PostgresAny(
-      `SELECT COUNT(*) AS cnt FROM stock_batches WHERE stock_item_id = $1 AND remaining_qty > 0`,
+      `SELECT COUNT(*) AS cnt FROM stock_entries WHERE stock_item_id = $1 AND remaining_qty > 0`,
       [id]
     );
     if (Number(active[0].cnt) > 0) {

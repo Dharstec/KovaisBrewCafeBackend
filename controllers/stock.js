@@ -576,6 +576,66 @@ exports.getExpiringEntries = async (req, res) => {
 
 
 /* ─────────────────────────────────────────────────────────
+   STOCK ALERTS  — expiring in 30 days + low stock
+   GET /stock/alerts
+   Accessible to all users (cashier + admin)
+   ───────────────────────────────────────────────────────── */
+exports.getAlerts = async (_req, res) => {
+  try {
+    const expiring = await DB.PostgresAny(`
+      SELECT
+        se.id,
+        si.name             AS item_name,
+        si.base_unit,
+        se.qty,
+        se.unit,
+        ROUND(se.remaining_qty, 2) AS remaining_qty,
+        se.expiry_date,
+        se.supplier,
+        se.batch_no,
+        (se.expiry_date - CURRENT_DATE) AS days_to_expiry,
+        CASE
+          WHEN se.expiry_date < CURRENT_DATE                      THEN 'EXPIRED'
+          WHEN se.expiry_date <= CURRENT_DATE + INTERVAL '3 days' THEN 'EXPIRING_TODAY'
+          WHEN se.expiry_date <= CURRENT_DATE + INTERVAL '7 days' THEN 'EXPIRING_SOON'
+          ELSE                                                          'EXPIRING_30'
+        END AS status
+      FROM stock_entries se
+      JOIN stock_items si ON si.id = se.stock_item_id
+      WHERE se.remaining_qty > 0
+        AND se.expiry_date IS NOT NULL
+        AND se.expiry_date <= CURRENT_DATE + INTERVAL '30 days'
+      ORDER BY se.expiry_date ASC
+    `, []);
+
+    const low_stock = await DB.PostgresAny(`
+      SELECT
+        si.id,
+        si.name,
+        si.base_unit,
+        si.unit_label,
+        ROUND(si.current_qty, 2) AS current_qty,
+        ROUND(si.min_qty, 2)     AS min_qty
+      FROM stock_items si
+      WHERE si.is_active = true
+        AND si.current_qty <= si.min_qty
+      ORDER BY si.current_qty ASC
+    `, []);
+
+    res.json({
+      expiring,
+      low_stock,
+      expiring_count: expiring.length,
+      low_stock_count: low_stock.length
+    });
+  } catch (err) {
+    console.error("Get alerts error:", err);
+    res.status(500).json({ message: "Failed to get alerts" });
+  }
+};
+
+
+/* ─────────────────────────────────────────────────────────
    STOCK LOGS  — NEW (separate page, all movements)
    GET /stock/logs?product_id=X&action=STOCK_IN
    ───────────────────────────────────────────────────────── */

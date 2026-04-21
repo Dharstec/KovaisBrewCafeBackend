@@ -1,15 +1,13 @@
 const DB = require("../middleware/dbFunctions");
 
 /* =========================================================
-   HELPER — deduct stock for a set of bill items
-   Called inside an already-open transaction (client)
-   Does NOT write stock_logs — logs are written only at COMPLETE
+   HELPER — FIFO deduction from stock_entries
+   Consumes nearest-expiry batches first (oldest expiry → oldest purchase).
+   Writes USAGE_RESERVED logs per entry for reversibility on cancel.
+   Also updates stock_items.current_qty.
    ========================================================= */
 async function _deductStock(client, items, billId) {
   for (const i of items) {
-    /* RECIPE stock — deduct from stock_items.
-       Fallback to raw_product_id for legacy recipes saved before the
-       stock_items migration (where stock_item_id may still be NULL). */
     const recipes = await client.query(
       `SELECT COALESCE(stock_item_id, raw_product_id) AS stock_item_id, used_qty
        FROM product_recipes
@@ -19,21 +17,62 @@ async function _deductStock(client, items, billId) {
     );
 
     for (const r of recipes.rows) {
-      const used = r.used_qty * i.qty;
+      const totalUsed = Number(r.used_qty) * Number(i.qty);
+
+      /* 1. Deduct from stock_items.current_qty */
       await client.query(
         `UPDATE stock_items SET current_qty = current_qty - $1, updated_at = NOW() WHERE id = $2`,
-        [used, r.stock_item_id]
+        [totalUsed, r.stock_item_id]
       );
+
+      /* 2. FIFO deduction from stock_entries
+            Order: nearest expiry first (NULL = no-expiry last), then oldest purchase */
+      const batches = await client.query(
+        `SELECT id, remaining_qty FROM stock_entries
+         WHERE stock_item_id = $1 AND remaining_qty > 0
+         ORDER BY expiry_date ASC NULLS LAST, purchase_date ASC, created_at ASC`,
+        [r.stock_item_id]
+      );
+
+      let remaining = totalUsed;
+      for (const batch of batches.rows) {
+        if (remaining <= 0) break;
+
+        const deduct = Math.min(remaining, Number(batch.remaining_qty));
+
+        await client.query(
+          `UPDATE stock_entries SET remaining_qty = remaining_qty - $1 WHERE id = $2`,
+          [deduct, batch.id]
+        );
+
+        /* Write USAGE_RESERVED log linking bill → specific entry (used by _restoreStock) */
+        await client.query(
+          `INSERT INTO stock_logs
+             (stock_item_id, stock_entry_id, change_qty, action, reference_id, note)
+           VALUES ($1, $2, $3, 'USAGE_RESERVED', $4, $5)`,
+          [
+            r.stock_item_id,
+            batch.id,
+            -deduct,
+            billId,
+            `Reserved for bill #${billId} — entry #${batch.id}`
+          ]
+        );
+
+        remaining -= deduct;
+      }
+      /* If remaining > 0 here, stock_items went negative (offline / edge case) — already allowed */
     }
   }
 }
 
 /* =========================================================
-   HELPER — restore stock for all items of a bill
-   Called inside an already-open transaction (client)
+   HELPER — restore stock on cancel
+   Reverses both stock_items.current_qty and
+   stock_entries.remaining_qty using the USAGE_RESERVED logs.
    ========================================================= */
 async function _restoreStock(client, billId) {
-  /* RECIPE stock — restore to stock_items (legacy-safe) */
+  /* Restore stock_items.current_qty via recipe lookup (legacy-safe) */
   const recipes = await client.query(
     `SELECT COALESCE(pr.stock_item_id, pr.raw_product_id) AS stock_item_id,
             pr.used_qty, bi.qty
@@ -51,36 +90,41 @@ async function _restoreStock(client, billId) {
       [restoreQty, r.stock_item_id]
     );
   }
-}
 
-/* =========================================================
-   HELPER — write SALE + USAGE stock_logs for a completed bill
-   Called inside an already-open transaction (client)
-   ========================================================= */
-async function _writeCompletionLogs(client, billId) {
-  const items = await client.query(
-    `SELECT bi.product_id, bi.qty FROM bill_items bi WHERE bi.bill_id = $1`,
+  /* Restore stock_entries.remaining_qty from USAGE_RESERVED logs */
+  const logs = await client.query(
+    `SELECT stock_entry_id, change_qty FROM stock_logs
+     WHERE reference_id = $1 AND action = 'USAGE_RESERVED'`,
     [billId]
   );
 
-  for (const i of items.rows) {
-    /* RECIPE USAGE logs — write to stock_logs against stock_item_id */
-    const recipes = await client.query(
-      `SELECT COALESCE(stock_item_id, raw_product_id) AS stock_item_id, used_qty
-       FROM product_recipes
-       WHERE sale_product_id = $1
-         AND COALESCE(stock_item_id, raw_product_id) IS NOT NULL`,
-      [i.product_id]
+  for (const log of logs.rows) {
+    /* change_qty is negative (deduction), so subtract it to restore */
+    await client.query(
+      `UPDATE stock_entries SET remaining_qty = remaining_qty - $1 WHERE id = $2`,
+      [log.change_qty, log.stock_entry_id]  /* -(-X) = +X */
     );
-    for (const r of recipes.rows) {
-      const used = Number(r.used_qty) * Number(i.qty);
-      await client.query(
-        `INSERT INTO stock_logs (stock_item_id, change_qty, action, reference_id, note)
-         VALUES ($1, $2, 'USAGE', $3, $4)`,
-        [r.stock_item_id, -used, billId, `Recipe usage — bill #${billId}`]
-      );
-    }
   }
+
+  /* Mark those reserved logs as RETURN */
+  await client.query(
+    `UPDATE stock_logs SET action = 'RETURN', note = CONCAT('Cancelled — ', note)
+     WHERE reference_id = $1 AND action = 'USAGE_RESERVED'`,
+    [billId]
+  );
+}
+
+/* =========================================================
+   HELPER — finalise logs when bill completes
+   Promotes USAGE_RESERVED → USAGE (already written at create time).
+   No new entry needed — just flip the action.
+   ========================================================= */
+async function _writeCompletionLogs(client, billId) {
+  await client.query(
+    `UPDATE stock_logs SET action = 'USAGE', note = REPLACE(note, 'Reserved for', 'Used for')
+     WHERE reference_id = $1 AND action = 'USAGE_RESERVED'`,
+    [billId]
+  );
 }
 
 /* =========================================================
@@ -357,31 +401,8 @@ exports.cancelBill = async (req, res) => {
       return res.status(400).json({ message: "Only PENDING bills can be cancelled" });
     }
 
-    /* Restore all reserved stock */
+    /* Restore stock_items + stock_entries, promote logs USAGE_RESERVED → RETURN */
     await _restoreStock(client, billId);
-
-    /* Write RETURN logs against stock_items */
-    const items = await client.query(
-      `SELECT bi.product_id, bi.qty FROM bill_items bi WHERE bi.bill_id = $1`,
-      [billId]
-    );
-    for (const i of items.rows) {
-      const recipes = await client.query(
-        `SELECT COALESCE(stock_item_id, raw_product_id) AS stock_item_id, used_qty
-         FROM product_recipes
-         WHERE sale_product_id = $1
-           AND COALESCE(stock_item_id, raw_product_id) IS NOT NULL`,
-        [i.product_id]
-      );
-      for (const r of recipes.rows) {
-        const restored = Number(r.used_qty) * Number(i.qty);
-        await client.query(
-          `INSERT INTO stock_logs (stock_item_id, change_qty, action, reference_id, note)
-           VALUES ($1, $2, 'RETURN', $3, $4)`,
-          [r.stock_item_id, restored, billId, `Bill #${billId} cancelled — recipe restore`]
-        );
-      }
-    }
 
     await client.query(
       `UPDATE bills SET status = 'CANCELLED' WHERE id = $1`,
