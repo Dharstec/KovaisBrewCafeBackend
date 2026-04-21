@@ -78,9 +78,8 @@ const getAllRecords = async (req, res) => {
 
 const addRecord = async (req, res) => {
     try {
-
-        await POSTGRESQLService.PostgresInsert(TABLE_SPENT, req.body);
-        res.json({ status: 'success', message: 'Item added' });
+        const row = await POSTGRESQLService.PostgresInsert(TABLE_SPENT, req.body);
+        res.json({ status: 'success', message: 'Item added', id: row.id });
     } catch (err) {
         res.status(500).json({ status: 'error', message: err.message });
     }
