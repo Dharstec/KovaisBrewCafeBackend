@@ -26,12 +26,24 @@ exports.getAllProductsBilling = async (req, res) => {
         p.is_manual_price,
         c.name AS category,
         EXISTS(SELECT 1 FROM product_recipes pr WHERE pr.sale_product_id = p.id) AS has_recipe,
-        (
-          SELECT MIN(FLOOR(si.current_qty / NULLIF(pr.used_qty, 0)))
-          FROM product_recipes pr
-          JOIN stock_items si ON si.id = pr.stock_item_id
-          WHERE pr.sale_product_id = p.id
-        ) AS servings_possible
+        CASE
+          -- product has a recipe: min servings across all ingredients
+          WHEN EXISTS(SELECT 1 FROM product_recipes pr WHERE pr.sale_product_id = p.id)
+          THEN (
+            SELECT MIN(FLOOR(si.current_qty / NULLIF(pr.used_qty, 0)))
+            FROM product_recipes pr
+            JOIN stock_items si ON si.id = pr.stock_item_id
+            WHERE pr.sale_product_id = p.id
+          )
+          -- no recipe: look for a stock item with the same name
+          ELSE (
+            SELECT FLOOR(si.current_qty)
+            FROM stock_items si
+            WHERE LOWER(si.name) = LOWER(p.name)
+              AND si.is_active = true
+            LIMIT 1
+          )
+        END AS servings_possible
       FROM products p
       JOIN categories c ON c.id = p.category_id
       WHERE p.is_active   = true
