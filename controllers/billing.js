@@ -6,6 +6,47 @@ const DB = require("../middleware/dbFunctions");
    Writes USAGE_RESERVED logs per entry for reversibility on cancel.
    Also updates stock_items.current_qty.
    ========================================================= */
+async function _deductStockItem(client, stockItemId, totalUsed, billId, note) {
+  /* Deduct from stock_items.current_qty */
+  await client.query(
+    `UPDATE stock_items SET current_qty = current_qty - $1, updated_at = NOW() WHERE id = $2`,
+    [totalUsed, stockItemId]
+  );
+
+  /* FIFO deduction from stock_entries */
+  const batches = await client.query(
+    `SELECT id, remaining_qty FROM stock_entries
+     WHERE stock_item_id = $1 AND remaining_qty > 0
+     ORDER BY expiry_date ASC NULLS LAST, purchase_date ASC, created_at ASC`,
+    [stockItemId]
+  );
+
+  let remaining = totalUsed;
+  for (const batch of batches.rows) {
+    if (remaining <= 0) break;
+    const deduct = Math.min(remaining, Number(batch.remaining_qty));
+    await client.query(
+      `UPDATE stock_entries SET remaining_qty = remaining_qty - $1 WHERE id = $2`,
+      [deduct, batch.id]
+    );
+    await client.query(
+      `INSERT INTO stock_logs (stock_item_id, stock_entry_id, change_qty, action, reference_id, note)
+       VALUES ($1, $2, $3, 'USAGE_RESERVED', $4, $5)`,
+      [stockItemId, batch.id, -deduct, billId, note]
+    );
+    remaining -= deduct;
+  }
+
+  /* No entries: log against item only (stock_entry_id = NULL) */
+  if (batches.rows.length === 0) {
+    await client.query(
+      `INSERT INTO stock_logs (stock_item_id, stock_entry_id, change_qty, action, reference_id, note)
+       VALUES ($1, NULL, $2, 'USAGE_RESERVED', $3, $4)`,
+      [stockItemId, -totalUsed, billId, note]
+    );
+  }
+}
+
 async function _deductStock(client, items, billId) {
   for (const i of items) {
     const recipes = await client.query(
@@ -16,52 +57,27 @@ async function _deductStock(client, items, billId) {
       [i.productId]
     );
 
-    for (const r of recipes.rows) {
-      const totalUsed = Number(r.used_qty) * Number(i.qty);
-
-      /* 1. Deduct from stock_items.current_qty */
-      await client.query(
-        `UPDATE stock_items SET current_qty = current_qty - $1, updated_at = NOW() WHERE id = $2`,
-        [totalUsed, r.stock_item_id]
-      );
-
-      /* 2. FIFO deduction from stock_entries
-            Order: nearest expiry first (NULL = no-expiry last), then oldest purchase */
-      const batches = await client.query(
-        `SELECT id, remaining_qty FROM stock_entries
-         WHERE stock_item_id = $1 AND remaining_qty > 0
-         ORDER BY expiry_date ASC NULLS LAST, purchase_date ASC, created_at ASC`,
-        [r.stock_item_id]
-      );
-
-      let remaining = totalUsed;
-      for (const batch of batches.rows) {
-        if (remaining <= 0) break;
-
-        const deduct = Math.min(remaining, Number(batch.remaining_qty));
-
-        await client.query(
-          `UPDATE stock_entries SET remaining_qty = remaining_qty - $1 WHERE id = $2`,
-          [deduct, batch.id]
+    if (recipes.rows.length > 0) {
+      /* Product has a recipe — deduct each ingredient */
+      for (const r of recipes.rows) {
+        const totalUsed = Number(r.used_qty) * Number(i.qty);
+        await _deductStockItem(
+          client, r.stock_item_id, totalUsed, billId,
+          `Reserved for bill #${billId} — entry`
         );
-
-        /* Write USAGE_RESERVED log linking bill → specific entry (used by _restoreStock) */
-        await client.query(
-          `INSERT INTO stock_logs
-             (stock_item_id, stock_entry_id, change_qty, action, reference_id, note)
-           VALUES ($1, $2, $3, 'USAGE_RESERVED', $4, $5)`,
-          [
-            r.stock_item_id,
-            batch.id,
-            -deduct,
-            billId,
-            `Reserved for bill #${billId} — entry #${batch.id}`
-          ]
-        );
-
-        remaining -= deduct;
       }
-      /* If remaining > 0 here, stock_items went negative (offline / edge case) — already allowed */
+    } else {
+      /* No recipe — find stock item by matching product name (1 unit per qty) */
+      const direct = await client.query(
+        `SELECT id FROM stock_items WHERE LOWER(name) = LOWER($1) AND is_active = true LIMIT 1`,
+        [i.name]
+      );
+      if (direct.rows.length) {
+        await _deductStockItem(
+          client, direct.rows[0].id, Number(i.qty), billId,
+          `Reserved for bill #${billId} — direct stock`
+        );
+      }
     }
   }
 }
@@ -72,41 +88,39 @@ async function _deductStock(client, items, billId) {
    stock_entries.remaining_qty using the USAGE_RESERVED logs.
    ========================================================= */
 async function _restoreStock(client, billId) {
-  /* Restore stock_items.current_qty via recipe lookup (legacy-safe) */
-  const recipes = await client.query(
-    `SELECT COALESCE(pr.stock_item_id, pr.raw_product_id) AS stock_item_id,
-            pr.used_qty, bi.qty
-     FROM bill_items bi
-     JOIN product_recipes pr ON pr.sale_product_id = bi.product_id
-     WHERE bi.bill_id = $1
-       AND COALESCE(pr.stock_item_id, pr.raw_product_id) IS NOT NULL`,
-    [billId]
-  );
-
-  for (const r of recipes.rows) {
-    const restoreQty = Number(r.used_qty) * Number(r.qty);
-    await client.query(
-      `UPDATE stock_items SET current_qty = current_qty + $1, updated_at = NOW() WHERE id = $2`,
-      [restoreQty, r.stock_item_id]
-    );
-  }
-
-  /* Restore stock_entries.remaining_qty from USAGE_RESERVED logs */
+  /* Read all USAGE_RESERVED logs — covers both recipe and direct-stock items */
   const logs = await client.query(
-    `SELECT stock_entry_id, change_qty FROM stock_logs
+    `SELECT stock_item_id, stock_entry_id, change_qty FROM stock_logs
      WHERE reference_id = $1 AND action = 'USAGE_RESERVED'`,
     [billId]
   );
 
+  if (!logs.rows.length) return;
+
+  /* Restore stock_items.current_qty — group by stock_item_id */
+  const itemMap = {};
   for (const log of logs.rows) {
-    /* change_qty is negative (deduction), so subtract it to restore */
+    const k = String(log.stock_item_id);
+    itemMap[k] = (itemMap[k] || 0) + Number(log.change_qty); // negative
+  }
+  for (const [id, changeQty] of Object.entries(itemMap)) {
+    /* change_qty is negative, subtract it → adds back */
     await client.query(
-      `UPDATE stock_entries SET remaining_qty = remaining_qty - $1 WHERE id = $2`,
-      [log.change_qty, log.stock_entry_id]  /* -(-X) = +X */
+      `UPDATE stock_items SET current_qty = current_qty - $1, updated_at = NOW() WHERE id = $2`,
+      [changeQty, id]
     );
   }
 
-  /* Mark those reserved logs as RETURN */
+  /* Restore stock_entries.remaining_qty */
+  for (const log of logs.rows) {
+    if (!log.stock_entry_id) continue;
+    await client.query(
+      `UPDATE stock_entries SET remaining_qty = remaining_qty - $1 WHERE id = $2`,
+      [log.change_qty, log.stock_entry_id]
+    );
+  }
+
+  /* Promote USAGE_RESERVED → RETURN */
   await client.query(
     `UPDATE stock_logs SET action = 'RETURN', note = CONCAT('Cancelled — ', note)
      WHERE reference_id = $1 AND action = 'USAGE_RESERVED'`,
