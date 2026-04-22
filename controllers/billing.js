@@ -494,7 +494,7 @@ exports.pendingBills = async (req, res) => {
     );
     for (const b of bills) {
       b.items = await DB.PostgresAny(
-        `SELECT product_id AS productId, product_name AS name, price, qty
+        `SELECT product_id AS "productId", product_name AS name, price, qty
          FROM bill_items WHERE bill_id = $1`,
         [b.id]
       );
@@ -540,7 +540,7 @@ exports.completedBills = async (req, res) => {
 
     for (const b of bills) {
       b.items = await DB.PostgresAny(
-        `SELECT product_id AS productId, product_name AS name, price, qty
+        `SELECT product_id AS "productId", product_name AS name, price, qty
          FROM bill_items WHERE bill_id = $1`,
         [b.id]
       );
