@@ -176,7 +176,7 @@ exports.createBill = async (req, res) => {
 
     /* 1️⃣  PRE-VALIDATE STOCK — no DB changes yet */
     for (const i of items) {
-      if (!i.productId || !i.name || !i.price || !i.qty) {
+      if (!i.productId || !i.name || i.price == null || i.price === '' || isNaN(Number(i.price)) || !i.qty) {
         throw { code: "INVALID_ITEM_DATA", message: "Invalid item data", product: i.name };
       }
 
@@ -305,7 +305,7 @@ exports.updateBill = async (req, res) => {
 
     /* 4️⃣  PRE-VALIDATE new items */
     for (const i of items) {
-      if (!i.productId || !i.name || !i.price || !i.qty) {
+      if (!i.productId || !i.name || i.price == null || i.price === '' || isNaN(Number(i.price)) || !i.qty) {
         throw { code: "INVALID_ITEM_DATA", message: "Invalid item data", product: i.name };
       }
 
@@ -655,7 +655,7 @@ exports.editCompletedBill = async (req, res) => {
 
     let total = 0;
     for (const i of items) {
-      if (!i.productId || !i.name || i.price == null || !i.qty) {
+      if (!i.productId || !i.name || i.price == null || i.price === '' || isNaN(Number(i.price)) || !i.qty) {
         throw { code: 'INVALID_ITEM_DATA', message: `Invalid item: ${i.name}` };
       }
       await client.query(
