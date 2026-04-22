@@ -19,7 +19,7 @@ exports.getSettings = async (_req, res) => {
 
 exports.updateSettings = async (req, res) => {
   try {
-    if (req.role_type !== 'admin') {
+    if (req.role_type !== 'Admin') {
       return res.status(403).json({ msg: "Admin access required" });
     }
     const allowed = ['zomato_packing_default', 'swiggy_packing_default'];
