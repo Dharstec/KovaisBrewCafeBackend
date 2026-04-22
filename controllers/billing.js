@@ -696,6 +696,48 @@ exports.editCompletedBill = async (req, res) => {
 };
 
 /* =========================================================
+   DELETE COMPLETED BILL (admin only)
+   Restores stock, removes bill_items + bill record.
+   ========================================================= */
+exports.deleteCompletedBill = async (req, res) => {
+  if (req.role_type !== 'Admin') {
+    return res.status(403).json({ msg: 'Admin access required' });
+  }
+
+  const client = await DB.getClient();
+  try {
+    const billId = Number(req.params.id);
+
+    await client.query('BEGIN');
+
+    const bill = await client.query(
+      `SELECT id FROM bills WHERE id = $1 AND status = 'COMPLETED'`,
+      [billId]
+    );
+    if (!bill.rows.length) {
+      await client.query('ROLLBACK');
+      return res.status(404).json({ msg: 'Completed bill not found' });
+    }
+
+    await _restoreCompletedStock(client, billId);
+
+    await client.query(`DELETE FROM bill_items WHERE bill_id = $1`, [billId]);
+    await client.query(`DELETE FROM stock_logs  WHERE reference_id = $1`, [billId]);
+    await client.query(`DELETE FROM bills        WHERE id = $1`, [billId]);
+
+    await client.query('COMMIT');
+    res.json({ message: 'Bill deleted and stock restored', bill_id: billId });
+
+  } catch (err) {
+    await client.query('ROLLBACK');
+    console.error('Delete completed bill error:', err);
+    res.status(500).json({ msg: err.message || 'Delete failed' });
+  } finally {
+    client.release();
+  }
+};
+
+/* =========================================================
    SYNC OFFLINE BILL — create + complete atomically
    local_id guarantees idempotency on retry
    ========================================================= */
