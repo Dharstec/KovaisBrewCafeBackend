@@ -13,6 +13,7 @@ const spend = require("./routes/spend");
 const targets   = require("./routes/targets");
 const stockItem = require("./routes/stockItem");
 const salary    = require("./routes/salary");
+const settings  = require("./routes/settings");
 
 module.exports = function (app) {
     app.use("/", indexRoute);
@@ -30,6 +31,7 @@ module.exports = function (app) {
     app.use("/api", targets);
     app.use("/api", stockItem);
     app.use("/api", salary);
+    app.use("/api", settings);
 }
 
 
