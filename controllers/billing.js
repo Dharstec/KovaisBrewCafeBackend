@@ -576,6 +576,126 @@ exports.completedBills = async (req, res) => {
 };
 
 /* =========================================================
+   HELPER — restore stock for an already-COMPLETED bill
+   Mirrors _restoreStock but reads USAGE logs (not USAGE_RESERVED).
+   Deletes those logs so _deductStock + _writeCompletionLogs can rewrite them.
+   ========================================================= */
+async function _restoreCompletedStock(client, billId) {
+  const logs = await client.query(
+    `SELECT stock_item_id, stock_entry_id, change_qty FROM stock_logs
+     WHERE reference_id = $1 AND action = 'USAGE'`,
+    [billId]
+  );
+  if (!logs.rows.length) return;
+
+  /* Restore stock_items.current_qty (change_qty is negative → subtract to add back) */
+  const itemMap = {};
+  for (const log of logs.rows) {
+    const k = String(log.stock_item_id);
+    itemMap[k] = (itemMap[k] || 0) + Number(log.change_qty);
+  }
+  for (const [id, changeQty] of Object.entries(itemMap)) {
+    await client.query(
+      `UPDATE stock_items SET current_qty = current_qty - $1, updated_at = NOW() WHERE id = $2`,
+      [changeQty, id]
+    );
+  }
+
+  /* Restore stock_entries.remaining_qty */
+  for (const log of logs.rows) {
+    if (!log.stock_entry_id) continue;
+    await client.query(
+      `UPDATE stock_entries SET remaining_qty = remaining_qty - $1 WHERE id = $2`,
+      [log.change_qty, log.stock_entry_id]
+    );
+  }
+
+  /* Remove old USAGE logs so they can be rewritten after edit */
+  await client.query(
+    `DELETE FROM stock_logs WHERE reference_id = $1 AND action = 'USAGE'`,
+    [billId]
+  );
+}
+
+/* =========================================================
+   EDIT COMPLETED BILL (admin only)
+   Restores stock from old items, re-deducts for new items.
+   Works for ALL completed bills — frontend restricts UI to zomato/swiggy.
+   ========================================================= */
+exports.editCompletedBill = async (req, res) => {
+  if (req.role_type !== 'Admin') {
+    return res.status(403).json({ msg: 'Admin access required' });
+  }
+
+  const client = await DB.getClient();
+  try {
+    const billId = Number(req.params.id);
+    const { items, customer_name } = req.body;
+
+    if (!Array.isArray(items) || !items.length) {
+      return res.status(400).json({ msg: 'Items required' });
+    }
+
+    await client.query('BEGIN');
+
+    const bill = await client.query(
+      `SELECT id, platform FROM bills WHERE id = $1 AND status = 'COMPLETED'`,
+      [billId]
+    );
+    if (!bill.rows.length) {
+      await client.query('ROLLBACK');
+      return res.status(404).json({ msg: 'Completed bill not found' });
+    }
+
+    /* 1. Restore stock from old items */
+    await _restoreCompletedStock(client, billId);
+
+    /* 2. Replace bill items */
+    await client.query(`DELETE FROM bill_items WHERE bill_id = $1`, [billId]);
+
+    let total = 0;
+    for (const i of items) {
+      if (!i.productId || !i.name || i.price == null || !i.qty) {
+        throw { code: 'INVALID_ITEM_DATA', message: `Invalid item: ${i.name}` };
+      }
+      await client.query(
+        `INSERT INTO bill_items (bill_id, product_id, product_name, price, qty)
+         VALUES ($1,$2,$3,$4,$5)`,
+        [billId, i.productId, i.name, i.price, i.qty]
+      );
+      total += Number(i.price) * Number(i.qty);
+    }
+
+    /* 3. Re-deduct stock for new items */
+    await _deductStock(client, items, billId);
+
+    /* 4. Promote USAGE_RESERVED → USAGE immediately (bill stays COMPLETED) */
+    await _writeCompletionLogs(client, billId);
+
+    /* 5. Update bill total + customer name */
+    await client.query(
+      `UPDATE bills SET grand_total = $1, customer_name = $2 WHERE id = $3`,
+      [total, customer_name || null, billId]
+    );
+
+    await client.query('COMMIT');
+    res.json({ message: 'Bill updated', bill_id: billId, grand_total: total });
+
+  } catch (err) {
+    await client.query('ROLLBACK');
+    console.error('Edit completed bill error:', err);
+    res.status(400).json({
+      success: false,
+      code:    err.code    || 'EDIT_FAILED',
+      message: err.message || 'Bill edit failed',
+      details: err
+    });
+  } finally {
+    client.release();
+  }
+};
+
+/* =========================================================
    SYNC OFFLINE BILL — create + complete atomically
    local_id guarantees idempotency on retry
    ========================================================= */
