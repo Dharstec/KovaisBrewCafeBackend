@@ -305,6 +305,7 @@ exports.updateBill = async (req, res) => {
 
     /* 4️⃣  PRE-VALIDATE new items */
     for (const i of items) {
+      console.log('[validate item]', { productId: i.productId, name: i.name, price: i.price, qty: i.qty, priceType: typeof i.price });
       if (!i.productId || !i.name || i.price == null || i.price === '' || isNaN(Number(i.price)) || !i.qty) {
         throw { code: "INVALID_ITEM_DATA", message: "Invalid item data", product: i.name };
       }
