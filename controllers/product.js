@@ -27,24 +27,26 @@ exports.getAllProductsBilling = async (req, res) => {
         p.category_id,
         p.is_manual_price,
         c.name AS category,
+        p.stock_item_id,
         EXISTS(SELECT 1 FROM product_recipes pr WHERE pr.sale_product_id = p.id) AS has_recipe,
         CASE
-          -- product has a recipe: min servings across all ingredients
+          -- Recipe-based: min servings across all ingredients
           WHEN EXISTS(SELECT 1 FROM product_recipes pr WHERE pr.sale_product_id = p.id)
           THEN (
             SELECT MIN(FLOOR(si.current_qty / NULLIF(pr.used_qty, 0)))
             FROM product_recipes pr
-            JOIN stock_items si ON si.id = pr.stock_item_id
+            JOIN stock_items si ON si.id = COALESCE(pr.stock_item_id, pr.raw_product_id)
             WHERE pr.sale_product_id = p.id
           )
-          -- no recipe: look for a stock item with the same name
-          ELSE (
+          -- Direct stock link: 1 unit sold = 1 stock unit deducted
+          WHEN p.stock_item_id IS NOT NULL
+          THEN (
             SELECT FLOOR(si.current_qty)
             FROM stock_items si
-            WHERE LOWER(si.name) = LOWER(p.name)
-              AND si.is_active = true
-            LIMIT 1
+            WHERE si.id = p.stock_item_id AND si.is_active = true
           )
+          -- No tracking
+          ELSE NULL
         END AS servings_possible
       FROM products p
       JOIN categories c ON c.id = p.category_id
@@ -105,12 +107,16 @@ exports.getAllProducts = async (req, res) => {
         p.is_sellable,
         p.is_manual_price,
         p.is_active,
+        p.stock_item_id,
         c.name AS category_name,
+        si.name AS stock_item_name,
         (SELECT COUNT(*) FROM product_recipes pr
-         WHERE pr.sale_product_id = p.id AND pr.stock_item_id IS NOT NULL
+         WHERE pr.sale_product_id = p.id
+           AND COALESCE(pr.stock_item_id, pr.raw_product_id) IS NOT NULL
         ) AS recipe_count
       FROM products p
       LEFT JOIN categories c ON c.id = p.category_id
+      LEFT JOIN stock_items si ON si.id = p.stock_item_id
       ${where}
       ORDER BY c.name, p.name
       LIMIT $${params.length + 1} OFFSET $${params.length + 2}
@@ -142,11 +148,13 @@ exports.getProductById = async (req, res) => {
   try {
     const data = await DB.PostgresAny(`
       SELECT p.id, p.name, p.price, p.zomato_price, p.swiggy_price,
-             p.image_url, p.category_id,
+             p.image_url, p.category_id, p.stock_item_id,
              p.is_sellable, p.is_manual_price, p.is_active,
-             c.name AS category_name
+             c.name AS category_name,
+             si.name AS stock_item_name
       FROM products p
       LEFT JOIN categories c ON c.id = p.category_id
+      LEFT JOIN stock_items si ON si.id = p.stock_item_id
       WHERE p.id = $1
     `, [Number(req.params.id)]);
 
@@ -173,6 +181,7 @@ exports.createProduct = async (req, res) => {
       zomato_price,
       swiggy_price,
       image_url,
+      stock_item_id,
       is_sellable     = true,
       is_manual_price = false
     } = req.body;
@@ -191,8 +200,10 @@ exports.createProduct = async (req, res) => {
       zomato_price:    zomato_price != null && zomato_price !== '' ? Number(zomato_price) : null,
       swiggy_price:    swiggy_price != null && swiggy_price !== '' ? Number(swiggy_price) : null,
       image_url:       image_url || null,
+      stock_item_id:   stock_item_id ? Number(stock_item_id) : null,
       is_sellable:     !!is_sellable,
       is_manual_price: !!is_manual_price,
+      base_unit:       'pcs',
       is_active:       true
     });
 
@@ -209,7 +220,7 @@ exports.createProduct = async (req, res) => {
    ───────────────────────────────────────────────────────── */
 exports.updateProduct = async (req, res) => {
   try {
-    const { name, category_id, price, zomato_price, swiggy_price, image_url, is_sellable, is_manual_price, is_active } = req.body;
+    const { name, category_id, price, zomato_price, swiggy_price, image_url, stock_item_id, is_sellable, is_manual_price, is_active } = req.body;
 
     const payload = {};
     if (name            !== undefined) payload.name            = name;
@@ -221,6 +232,7 @@ exports.updateProduct = async (req, res) => {
     if (price           !== undefined) payload.price           = Number(price);
     if (zomato_price    !== undefined) payload.zomato_price    = zomato_price !== '' && zomato_price != null ? Number(zomato_price) : null;
     if (swiggy_price    !== undefined) payload.swiggy_price    = swiggy_price !== '' && swiggy_price != null ? Number(swiggy_price) : null;
+    if (stock_item_id   !== undefined) payload.stock_item_id   = stock_item_id ? Number(stock_item_id) : null;
 
     payload.updated_at = new Date();
 

@@ -49,6 +49,22 @@ async function _deductStockItem(client, stockItemId, totalUsed, billId, note) {
 
 async function _deductStock(client, items, billId) {
   for (const i of items) {
+    /* 1. Direct stock link — buy-and-sell products (Coke, packets, etc.) */
+    const productRow = await client.query(
+      `SELECT stock_item_id FROM products WHERE id = $1`,
+      [i.productId]
+    );
+    const directItemId = productRow.rows[0]?.stock_item_id;
+
+    if (directItemId) {
+      await _deductStockItem(
+        client, directItemId, Number(i.qty), billId,
+        `Reserved for bill #${billId} — direct stock`
+      );
+      continue;
+    }
+
+    /* 2. Recipe-based — made-to-order products (Latte, food, etc.) */
     const recipes = await client.query(
       `SELECT COALESCE(stock_item_id, raw_product_id) AS stock_item_id, used_qty
        FROM product_recipes
@@ -58,27 +74,15 @@ async function _deductStock(client, items, billId) {
     );
 
     if (recipes.rows.length > 0) {
-      /* Product has a recipe — deduct each ingredient */
       for (const r of recipes.rows) {
         const totalUsed = Number(r.used_qty) * Number(i.qty);
         await _deductStockItem(
           client, r.stock_item_id, totalUsed, billId,
-          `Reserved for bill #${billId} — entry`
-        );
-      }
-    } else {
-      /* No recipe — find stock item by matching product name (1 unit per qty) */
-      const direct = await client.query(
-        `SELECT id FROM stock_items WHERE LOWER(name) = LOWER($1) AND is_active = true LIMIT 1`,
-        [i.name]
-      );
-      if (direct.rows.length) {
-        await _deductStockItem(
-          client, direct.rows[0].id, Number(i.qty), billId,
-          `Reserved for bill #${billId} — direct stock`
+          `Reserved for bill #${billId} — ingredient`
         );
       }
     }
+    /* 3. No link and no recipe → no stock deduction (services / untracked items) */
   }
 }
 
@@ -176,7 +180,30 @@ exports.createBill = async (req, res) => {
         throw { code: "INVALID_ITEM_DATA", message: "Invalid item data", product: i.name };
       }
 
-      /* recipe stock check — against stock_items table (legacy-safe) */
+      /* Check direct stock link first */
+      const productRow = await client.query(
+        `SELECT stock_item_id FROM products WHERE id = $1`,
+        [i.productId]
+      );
+      const directItemId = productRow.rows[0]?.stock_item_id;
+
+      if (directItemId) {
+        const stock = await client.query(
+          `SELECT current_qty, name FROM stock_items WHERE id = $1 AND is_active = true`,
+          [directItemId]
+        );
+        if (!stock.rows.length || stock.rows[0].current_qty < i.qty) {
+          throw {
+            code:      "INSUFFICIENT_STOCK",
+            product:   i.name,
+            required:  i.qty,
+            available: stock.rows[0]?.current_qty || 0
+          };
+        }
+        continue;
+      }
+
+      /* Recipe-based stock check */
       const recipes = await client.query(
         `SELECT COALESCE(stock_item_id, raw_product_id) AS stock_item_id, used_qty
          FROM product_recipes
@@ -280,6 +307,28 @@ exports.updateBill = async (req, res) => {
     for (const i of items) {
       if (!i.productId || !i.name || !i.price || !i.qty) {
         throw { code: "INVALID_ITEM_DATA", message: "Invalid item data", product: i.name };
+      }
+
+      const productRow = await client.query(
+        `SELECT stock_item_id FROM products WHERE id = $1`,
+        [i.productId]
+      );
+      const directItemId = productRow.rows[0]?.stock_item_id;
+
+      if (directItemId) {
+        const stock = await client.query(
+          `SELECT current_qty, name FROM stock_items WHERE id = $1 AND is_active = true`,
+          [directItemId]
+        );
+        if (!stock.rows.length || stock.rows[0].current_qty < i.qty) {
+          throw {
+            code:      "INSUFFICIENT_STOCK",
+            product:   i.name,
+            required:  i.qty,
+            available: stock.rows[0]?.current_qty || 0
+          };
+        }
+        continue;
       }
 
       const recipes = await client.query(
