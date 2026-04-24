@@ -100,8 +100,12 @@ function init() {
 
   client.on('disconnected', (reason) => {
     isReady = false;
-    console.log('[WhatsApp] Disconnected:', reason);
-    // No auto-reconnect — cron will init next time it's needed
+    console.log('[WhatsApp] Disconnected:', reason, '— will auto-reconnect in 30s');
+    // Silent auto-reconnect so the 11 PM cron finds a live session
+    try { client && client.destroy().catch(() => {}); } catch (_) {}
+    client      = null;
+    initStarted = false;
+    setTimeout(() => { try { init(); } catch (_) {} }, 30000);
   });
 
   console.log('[WhatsApp] Initializing (launching Chromium)…');

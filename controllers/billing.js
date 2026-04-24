@@ -154,7 +154,8 @@ exports.createBill = async (req, res) => {
   const client = await DB.getClient();
 
   try {
-    const { items, customer_name, local_id, platform } = req.body;
+    const { items, customer_name, local_id, platform, bill_date } = req.body;
+    const createdAt = (bill_date && req.role_type === 'Admin') ? bill_date : null;
 
     if (!Array.isArray(items) || !items.length) {
       return res.status(400).json({ code: "INVALID_ITEMS", message: "Items array required" });
@@ -231,9 +232,9 @@ exports.createBill = async (req, res) => {
 
     /* 2️⃣  CREATE BILL */
     const billRes = await client.query(
-      `INSERT INTO bills (customer_name, status, grand_total, local_id, platform)
-       VALUES ($1, 'PENDING', 0, $2, $3) RETURNING id`,
-      [customer_name, local_id || null, platform || null]
+      `INSERT INTO bills (customer_name, status, grand_total, local_id, platform, created_at)
+       VALUES ($1, 'PENDING', 0, $2, $3, COALESCE($4::timestamptz, NOW())) RETURNING id`,
+      [customer_name, local_id || null, platform || null, createdAt || null]
     );
     const billId = billRes.rows[0].id;
     let total = 0;
@@ -401,7 +402,8 @@ exports.completeBill = async (req, res) => {
   const client = await DB.getClient();
   try {
     const billId = req.params.id;
-    const { customer_name, payment_mode, grand_total, discount_amount = 0 } = req.body;
+    const { customer_name, payment_mode, grand_total, discount_amount = 0, bill_date } = req.body;
+    const createdAt = (bill_date && req.role_type === 'Admin') ? bill_date : null;
 
     await client.query("BEGIN");
 
@@ -421,9 +423,10 @@ exports.completeBill = async (req, res) => {
            payment_mode     = $2,
            status           = 'COMPLETED',
            grand_total      = $3,
-           discount_amount  = $4
+           discount_amount  = $4,
+           created_at       = COALESCE($6::timestamptz, created_at)
        WHERE id = $5`,
-      [customer_name, payment_mode, Number(grand_total) || 0, Number(discount_amount) || 0, billId]
+      [customer_name, payment_mode, Number(grand_total) || 0, Number(discount_amount) || 0, billId, createdAt || null]
     );
 
     /* Write SALE / USAGE logs now that the sale is confirmed */
@@ -746,8 +749,9 @@ exports.syncOfflineBill = async (req, res) => {
   try {
     const {
       items, customer_name, payment_mode,
-      grand_total, discount_amount = 0, local_id, platform
+      grand_total, discount_amount = 0, local_id, platform, bill_date
     } = req.body;
+    const createdAt = (bill_date && req.role_type === 'Admin') ? bill_date : null;
 
     if (!Array.isArray(items) || !items.length) {
       return res.status(400).json({ msg: "Items required" });
@@ -769,15 +773,16 @@ exports.syncOfflineBill = async (req, res) => {
 
     /* Insert as COMPLETED directly */
     const billRes = await client.query(
-      `INSERT INTO bills (customer_name, status, grand_total, discount_amount, payment_mode, local_id, platform)
-       VALUES ($1,'COMPLETED',$2,$3,$4,$5,$6) RETURNING id`,
+      `INSERT INTO bills (customer_name, status, grand_total, discount_amount, payment_mode, local_id, platform, created_at)
+       VALUES ($1,'COMPLETED',$2,$3,$4,$5,$6,COALESCE($7::timestamptz, NOW())) RETURNING id`,
       [
         customer_name,
         Number(grand_total) || 0,
         Number(discount_amount) || 0,
         payment_mode,
         local_id || null,
-        platform || null
+        platform || null,
+        createdAt || null
       ]
     );
     const billId = billRes.rows[0].id;
