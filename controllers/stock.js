@@ -1,60 +1,35 @@
 const DB = require("../middleware/dbFunctions");
 
 /* =========================================================
-   STOCK CONTROLLER
-   All existing API contracts are preserved:
-     GET  /stock               → same fields as before
-     GET  /stock_dropdown      → same fields as before
-     POST /stock/adjust        → still accepts product_id
-
-   Data source changed from products table → stock_items table
-   IDs are the same after migration so frontend sees no difference.
-
-   New APIs added (for new stock page):
-     POST /stock/add           → receive stock (qty + price + expiry)
-     GET  /stock/entries       → purchase history
-     GET  /stock/price-history/:id
-     GET  /stock/expiring
-     GET  /stock/logs
+   STOCK CONTROLLER (per shop)
    ========================================================= */
 
-
-/* ─────────────────────────────────────────────────────────
-   GET STOCK LIST  — existing contract kept
-   Returns: id, name, category_name, base_unit, unit_label,
-            unit_value, current_qty, min_qty
-   ───────────────────────────────────────────────────────── */
-exports.getStock = async (_req, res) => {
+exports.getStock = async (req, res) => {
   try {
     const data = await DB.PostgresAny(`
       SELECT
-        si.id,
-        si.name,
-        c.name                              AS category_name,
-        si.base_unit,
-        si.unit_label,
-        si.unit_value,
-        ROUND(si.current_qty, 2)            AS current_qty,
-        ROUND(si.min_qty, 2)                AS min_qty,
-        si.current_qty <= si.min_qty        AS is_low_stock,
+        si.id, si.name,
+        c.name AS category_name,
+        si.base_unit, si.unit_label, si.unit_value,
+        ROUND(si.current_qty, 2) AS current_qty,
+        ROUND(si.min_qty, 2)     AS min_qty,
+        si.current_qty <= si.min_qty AS is_low_stock,
         (SELECT MIN(se.expiry_date)
            FROM stock_entries se
-          WHERE se.stock_item_id = si.id
-            AND se.remaining_qty > 0
-            AND se.expiry_date IS NOT NULL
-        )                                   AS nearest_expiry,
+          WHERE se.stock_item_id = si.id AND se.shop_id = si.shop_id
+            AND se.remaining_qty > 0 AND se.expiry_date IS NOT NULL
+        ) AS nearest_expiry,
         (SELECT COUNT(*)
            FROM stock_entries se
-          WHERE se.stock_item_id = si.id
-            AND se.remaining_qty > 0
-            AND se.expiry_date IS NOT NULL
+          WHERE se.stock_item_id = si.id AND se.shop_id = si.shop_id
+            AND se.remaining_qty > 0 AND se.expiry_date IS NOT NULL
             AND se.expiry_date <= CURRENT_DATE + INTERVAL '7 days'
-        )                                   AS expiring_count
+        ) AS expiring_count
       FROM stock_items si
       LEFT JOIN categories c ON c.id = si.category_id
-      WHERE si.is_active = true
+      WHERE si.is_active = true AND si.shop_id = $1
       ORDER BY si.current_qty <= si.min_qty DESC, si.name ASC
-    `, []);
+    `, [req.shop_id]);
     res.json(data);
   } catch (err) {
     console.error("Get stock error:", err);
@@ -62,25 +37,15 @@ exports.getStock = async (_req, res) => {
   }
 };
 
-
-/* ─────────────────────────────────────────────────────────
-   GET STOCK DROPDOWN  — existing contract kept
-   Used by product page recipe builder (raw_product_id)
-   ───────────────────────────────────────────────────────── */
-exports.getDropDownStock = async (_req, res) => {
+exports.getDropDownStock = async (req, res) => {
   try {
     const data = await DB.PostgresAny(`
-      SELECT
-        id,
-        name,
-        base_unit,
-        unit_label,
-        unit_value,
-        ROUND(current_qty, 2) AS current_qty
+      SELECT id, name, base_unit, unit_label, unit_value,
+             ROUND(current_qty, 2) AS current_qty
       FROM stock_items
-      WHERE is_active = true
+      WHERE is_active = true AND shop_id = $1
       ORDER BY name
-    `, []);
+    `, [req.shop_id]);
     res.json(data);
   } catch (err) {
     console.error("Get dropdown error:", err);
@@ -88,15 +53,10 @@ exports.getDropDownStock = async (_req, res) => {
   }
 };
 
-
-/* ─────────────────────────────────────────────────────────
-   ADJUST STOCK  — existing contract kept
-   Accepts product_id (same ID as stock_item_id after migration)
-   ───────────────────────────────────────────────────────── */
 exports.adjustStock = async (req, res) => {
   const client = await DB.getClient();
+  const shopId = req.shop_id;
   try {
-    // Accept both product_id (old) and stock_item_id (new) — same value
     const stock_item_id = req.body.stock_item_id || req.body.product_id;
     const { change_qty, reason, note } = req.body;
 
@@ -112,9 +72,9 @@ exports.adjustStock = async (req, res) => {
     const result = await client.query(`
       UPDATE stock_items
       SET current_qty = current_qty + $1, updated_at = NOW()
-      WHERE id = $2 AND is_active = true
+      WHERE id = $2 AND is_active = true AND shop_id = $3
       RETURNING current_qty, name
-    `, [change_qty, stock_item_id]);
+    `, [change_qty, stock_item_id, shopId]);
 
     if (!result.rows.length) {
       await client.query("ROLLBACK");
@@ -122,9 +82,9 @@ exports.adjustStock = async (req, res) => {
     }
 
     await client.query(`
-      INSERT INTO stock_logs (stock_item_id, change_qty, action, note)
-      VALUES ($1, $2, $3, $4)
-    `, [stock_item_id, change_qty, logReason, note || null]);
+      INSERT INTO stock_logs (stock_item_id, change_qty, action, note, shop_id)
+      VALUES ($1, $2, $3, $4, $5)
+    `, [stock_item_id, change_qty, logReason, note || null, shopId]);
 
     await client.query("COMMIT");
 
@@ -141,17 +101,9 @@ exports.adjustStock = async (req, res) => {
   }
 };
 
-
-/* ─────────────────────────────────────────────────────────
-   ADD STOCK ENTRY  — single entry
-   POST /stock/add
-   Body:
-     stock_item_id (or product_id)
-     qty, purchase_price, purchase_date
-     expiry_date, supplier, batch_no, notes  (all optional)
-   ───────────────────────────────────────────────────────── */
 exports.addStockEntry = async (req, res) => {
   const client = await DB.getClient();
+  const shopId = req.shop_id;
   try {
     const {
       qty, purchase_price, purchase_date,
@@ -161,19 +113,16 @@ exports.addStockEntry = async (req, res) => {
     const stock_item_id = req.body.stock_item_id || req.body.product_id;
 
     if (!stock_item_id || !qty || purchase_price == null) {
-      return res.status(400).json({
-        message: "product_id, qty, purchase_price are required"
-      });
+      return res.status(400).json({ message: "product_id, qty, purchase_price are required" });
     }
 
     const item = await DB.PostgresAny(
-      `SELECT id, name, base_unit, unit_label, unit_value FROM stock_items WHERE id = $1`,
-      [stock_item_id]
+      `SELECT id, name, base_unit, unit_label, unit_value FROM stock_items WHERE id = $1 AND shop_id = $2`,
+      [stock_item_id, shopId]
     );
     if (!item.length) return res.status(404).json({ message: "Stock item not found" });
 
     const { unit_value, unit_label, base_unit, name } = item[0];
-    // Convert to base_qty: 5 kg × 1000 = 5000 gm
     const base_qty = Number(qty) * Number(unit_value);
 
     await client.query("BEGIN");
@@ -181,8 +130,8 @@ exports.addStockEntry = async (req, res) => {
     const entryRes = await client.query(`
       INSERT INTO stock_entries
         (stock_item_id, qty, unit, base_qty, remaining_qty,
-         purchase_price, purchase_date, expiry_date, supplier, batch_no, notes)
-      VALUES ($1,$2,$3,$4,$4,$5,$6,$7,$8,$9,$10)
+         purchase_price, purchase_date, expiry_date, supplier, batch_no, notes, shop_id)
+      VALUES ($1,$2,$3,$4,$4,$5,$6,$7,$8,$9,$10,$11)
       RETURNING id
     `, [
       stock_item_id,
@@ -194,12 +143,13 @@ exports.addStockEntry = async (req, res) => {
       expiry_date    || null,
       supplier       || null,
       batch_no       || null,
-      notes          || null
+      notes          || null,
+      shopId
     ]);
 
     await client.query(`
-      UPDATE stock_items SET current_qty = current_qty + $1, updated_at = NOW() WHERE id = $2
-    `, [base_qty, stock_item_id]);
+      UPDATE stock_items SET current_qty = current_qty + $1, updated_at = NOW() WHERE id = $2 AND shop_id = $3
+    `, [base_qty, stock_item_id, shopId]);
 
     const logNote = [
       `Added ${qty} ${unit_label}`,
@@ -209,9 +159,9 @@ exports.addStockEntry = async (req, res) => {
     ].filter(Boolean).join(' | ');
 
     await client.query(`
-      INSERT INTO stock_logs (stock_item_id, stock_entry_id, change_qty, action, note)
-      VALUES ($1, $2, $3, 'STOCK_IN', $4)
-    `, [stock_item_id, entryRes.rows[0].id, base_qty, logNote]);
+      INSERT INTO stock_logs (stock_item_id, stock_entry_id, change_qty, action, note, shop_id)
+      VALUES ($1, $2, $3, 'STOCK_IN', $4, $5)
+    `, [stock_item_id, entryRes.rows[0].id, base_qty, logNote, shopId]);
 
     await client.query("COMMIT");
 
@@ -237,56 +187,26 @@ exports.addStockEntry = async (req, res) => {
   }
 };
 
-
-/* ─────────────────────────────────────────────────────────
-   ADD STOCK — MULTIPLE BATCHES IN ONE CALL
-   POST /stock/add-bulk
-   Use when the same purchase has different expiry dates per batch.
-
-   Body:
-     stock_item_id (or product_id)
-     purchase_date : shared purchase date (optional, defaults today)
-     supplier      : shared supplier     (optional)
-     entries: [
-       { qty, purchase_price, expiry_date, batch_no, notes },
-       { qty, purchase_price, expiry_date, batch_no, notes },
-       ...
-     ]
-
-   Example — 10 kg sugar, 6 kg expires Apr-15, 4 kg expires May-01:
-   {
-     "stock_item_id": 3,
-     "supplier": "Raja Traders",
-     "purchase_date": "2026-03-28",
-     "entries": [
-       { "qty": 6, "purchase_price": 45, "expiry_date": "2026-04-15", "batch_no": "B001" },
-       { "qty": 4, "purchase_price": 45, "expiry_date": "2026-05-01", "batch_no": "B002" }
-     ]
-   }
-   ───────────────────────────────────────────────────────── */
 exports.addStockEntryBulk = async (req, res) => {
   const client = await DB.getClient();
+  const shopId = req.shop_id;
   try {
     const stock_item_id = req.body.stock_item_id || req.body.product_id;
     const { purchase_date, supplier, entries } = req.body;
 
     if (!stock_item_id || !Array.isArray(entries) || !entries.length) {
-      return res.status(400).json({
-        message: "stock_item_id and entries[] are required"
-      });
+      return res.status(400).json({ message: "stock_item_id and entries[] are required" });
     }
 
     for (const e of entries) {
       if (!e.qty || e.purchase_price == null) {
-        return res.status(400).json({
-          message: "Each entry must have qty and purchase_price"
-        });
+        return res.status(400).json({ message: "Each entry must have qty and purchase_price" });
       }
     }
 
     const item = await DB.PostgresAny(
-      `SELECT id, name, base_unit, unit_label, unit_value FROM stock_items WHERE id = $1`,
-      [stock_item_id]
+      `SELECT id, name, base_unit, unit_label, unit_value FROM stock_items WHERE id = $1 AND shop_id = $2`,
+      [stock_item_id, shopId]
     );
     if (!item.length) return res.status(404).json({ message: "Stock item not found" });
 
@@ -306,8 +226,8 @@ exports.addStockEntryBulk = async (req, res) => {
       const entryRes = await client.query(`
         INSERT INTO stock_entries
           (stock_item_id, qty, unit, base_qty, remaining_qty,
-           purchase_price, purchase_date, expiry_date, supplier, batch_no, notes)
-        VALUES ($1,$2,$3,$4,$4,$5,$6,$7,$8,$9,$10)
+           purchase_price, purchase_date, expiry_date, supplier, batch_no, notes, shop_id)
+        VALUES ($1,$2,$3,$4,$4,$5,$6,$7,$8,$9,$10,$11)
         RETURNING id
       `, [
         stock_item_id,
@@ -319,7 +239,8 @@ exports.addStockEntryBulk = async (req, res) => {
         e.expiry_date  || null,
         supplier       || e.supplier || null,
         e.batch_no     || null,
-        e.notes        || null
+        e.notes        || null,
+        shopId
       ]);
 
       const logNote = [
@@ -330,9 +251,9 @@ exports.addStockEntryBulk = async (req, res) => {
       ].filter(Boolean).join(' | ');
 
       await client.query(`
-        INSERT INTO stock_logs (stock_item_id, stock_entry_id, change_qty, action, note)
-        VALUES ($1, $2, $3, 'STOCK_IN', $4)
-      `, [stock_item_id, entryRes.rows[0].id, base_qty, logNote]);
+        INSERT INTO stock_logs (stock_item_id, stock_entry_id, change_qty, action, note, shop_id)
+        VALUES ($1, $2, $3, 'STOCK_IN', $4, $5)
+      `, [stock_item_id, entryRes.rows[0].id, base_qty, logNote, shopId]);
 
       addedEntries.push({
         entry_id:    entryRes.rows[0].id,
@@ -343,10 +264,9 @@ exports.addStockEntryBulk = async (req, res) => {
       });
     }
 
-    /* Update current_qty once with total */
     await client.query(`
-      UPDATE stock_items SET current_qty = current_qty + $1, updated_at = NOW() WHERE id = $2
-    `, [totalBaseQty, stock_item_id]);
+      UPDATE stock_items SET current_qty = current_qty + $1, updated_at = NOW() WHERE id = $2 AND shop_id = $3
+    `, [totalBaseQty, stock_item_id, shopId]);
 
     await client.query("COMMIT");
 
@@ -372,14 +292,10 @@ exports.addStockEntryBulk = async (req, res) => {
   }
 };
 
-
-/* ─────────────────────────────────────────────────────────
-   UPDATE STOCK ENTRY  — patch expiry_date, batch_no, supplier, notes
-   PATCH /stock/entries/:id
-   ───────────────────────────────────────────────────────── */
 exports.updateStockEntry = async (req, res) => {
   try {
     const id = Number(req.params.id);
+    const shopId = req.shop_id;
     const { expiry_date, batch_no, supplier, notes } = req.body;
 
     const fields = [];
@@ -406,17 +322,13 @@ exports.updateStockEntry = async (req, res) => {
       return res.status(400).json({ message: "Nothing to update" });
     }
 
-    params.push(id);
+    params.push(id, shopId);
     const result = await DB.PostgresAny(`
       UPDATE stock_entries
       SET ${fields.join(', ')}
-      WHERE id = $${params.length}
+      WHERE id = $${params.length - 1} AND shop_id = $${params.length}
       RETURNING
-        id,
-        expiry_date,
-        batch_no,
-        supplier,
-        notes,
+        id, expiry_date, batch_no, supplier, notes,
         CASE
           WHEN expiry_date IS NULL                                        THEN 'NO_EXPIRY'
           WHEN expiry_date < CURRENT_DATE                                 THEN 'EXPIRED'
@@ -435,25 +347,21 @@ exports.updateStockEntry = async (req, res) => {
   }
 };
 
-
-/* ─────────────────────────────────────────────────────────
-   STOCK ENTRIES LIST  — NEW (purchase history + price tracking)
-   ?product_id=X or ?stock_item_id=X
-   ───────────────────────────────────────────────────────── */
 exports.getStockEntries = async (req, res) => {
   try {
     const stock_item_id = req.query.stock_item_id || req.query.product_id;
     const { page = 1, limit = 20 } = req.query;
+    const shopId = req.shop_id;
 
     const pageNo   = Number(page);
     const pageSize = Number(limit);
     const offset   = (pageNo - 1) * pageSize;
 
-    const params = [];
-    let where = '';
+    const params = [shopId];
+    let where = `WHERE se.shop_id = $1`;
     if (stock_item_id) {
       params.push(stock_item_id);
-      where = `WHERE se.stock_item_id = $${params.length}`;
+      where += ` AND se.stock_item_id = $${params.length}`;
     }
 
     const entries = await DB.PostgresAny(`
@@ -462,17 +370,10 @@ exports.getStockEntries = async (req, res) => {
         se.stock_item_id          AS product_id,
         si.name                   AS item_name,
         si.base_unit,
-        se.qty,
-        se.unit,
-        se.base_qty,
+        se.qty, se.unit, se.base_qty,
         ROUND(se.remaining_qty,2) AS remaining_qty,
-        se.purchase_price,
-        se.purchase_date,
-        se.expiry_date,
-        se.supplier,
-        se.batch_no,
-        se.notes,
-        se.created_at,
+        se.purchase_price, se.purchase_date, se.expiry_date,
+        se.supplier, se.batch_no, se.notes, se.created_at,
         (se.expiry_date - CURRENT_DATE) AS days_to_expiry,
         CASE
           WHEN se.expiry_date IS NULL                                        THEN 'NO_EXPIRY'
@@ -480,7 +381,7 @@ exports.getStockEntries = async (req, res) => {
           WHEN se.expiry_date <= CURRENT_DATE + INTERVAL '3 days'            THEN 'EXPIRING_TODAY'
           WHEN se.expiry_date <= CURRENT_DATE + INTERVAL '7 days'            THEN 'EXPIRING_SOON'
           ELSE                                                                    'OK'
-        END                       AS expiry_status
+        END AS expiry_status
       FROM stock_entries se
       JOIN stock_items si ON si.id = se.stock_item_id
       ${where}
@@ -504,28 +405,18 @@ exports.getStockEntries = async (req, res) => {
   }
 };
 
-
-/* ─────────────────────────────────────────────────────────
-   PRICE HISTORY  — NEW (track price changes over time)
-   GET /stock/price-history/:product_id
-   ───────────────────────────────────────────────────────── */
 exports.getPriceHistory = async (req, res) => {
   try {
     const data = await DB.PostgresAny(`
       SELECT
-        se.id,
-        se.purchase_date,
-        se.qty,
-        se.unit,
-        se.purchase_price,
-        se.supplier,
-        se.batch_no,
+        se.id, se.purchase_date, se.qty, se.unit,
+        se.purchase_price, se.supplier, se.batch_no,
         si.name AS item_name
       FROM stock_entries se
       JOIN stock_items si ON si.id = se.stock_item_id
-      WHERE se.stock_item_id = $1
+      WHERE se.stock_item_id = $1 AND se.shop_id = $2
       ORDER BY se.purchase_date DESC, se.created_at DESC
-    `, [req.params.stock_item_id || req.params.product_id]);
+    `, [req.params.stock_item_id || req.params.product_id, req.shop_id]);
     res.json(data);
   } catch (err) {
     console.error("Price history error:", err);
@@ -533,27 +424,17 @@ exports.getPriceHistory = async (req, res) => {
   }
 };
 
-
-/* ─────────────────────────────────────────────────────────
-   EXPIRY ALERTS  — NEW
-   GET /stock/expiring?days=7
-   ───────────────────────────────────────────────────────── */
 exports.getExpiringEntries = async (req, res) => {
   try {
     const days = Number(req.query.days) || 7;
     const data = await DB.PostgresAny(`
       SELECT
         se.id,
-        si.name             AS item_name,
+        si.name AS item_name,
         si.base_unit,
-        se.qty,
-        se.unit,
-        se.remaining_qty,
-        se.purchase_price,
-        se.purchase_date,
-        se.expiry_date,
-        se.supplier,
-        se.batch_no,
+        se.qty, se.unit, se.remaining_qty,
+        se.purchase_price, se.purchase_date, se.expiry_date,
+        se.supplier, se.batch_no,
         (se.expiry_date - CURRENT_DATE) AS days_to_expiry,
         CASE
           WHEN se.expiry_date < CURRENT_DATE                      THEN 'EXPIRED'
@@ -565,8 +446,9 @@ exports.getExpiringEntries = async (req, res) => {
       WHERE se.remaining_qty > 0
         AND se.expiry_date IS NOT NULL
         AND se.expiry_date <= CURRENT_DATE + ($1 || ' days')::INTERVAL
+        AND se.shop_id = $2
       ORDER BY se.expiry_date ASC
-    `, [days]);
+    `, [days, req.shop_id]);
     res.json(data);
   } catch (err) {
     console.error("Get expiring error:", err);
@@ -574,25 +456,18 @@ exports.getExpiringEntries = async (req, res) => {
   }
 };
 
-
-/* ─────────────────────────────────────────────────────────
-   STOCK ALERTS  — expiring in 30 days + low stock
-   GET /stock/alerts
-   Accessible to all users (cashier + admin)
-   ───────────────────────────────────────────────────────── */
-exports.getAlerts = async (_req, res) => {
+exports.getAlerts = async (req, res) => {
   try {
+    const shopId = req.shop_id;
+
     const expiring = await DB.PostgresAny(`
       SELECT
         se.id,
-        si.name             AS item_name,
+        si.name AS item_name,
         si.base_unit,
-        se.qty,
-        se.unit,
+        se.qty, se.unit,
         ROUND(se.remaining_qty, 2) AS remaining_qty,
-        se.expiry_date,
-        se.supplier,
-        se.batch_no,
+        se.expiry_date, se.supplier, se.batch_no,
         (se.expiry_date - CURRENT_DATE) AS days_to_expiry,
         CASE
           WHEN se.expiry_date < CURRENT_DATE                      THEN 'EXPIRED'
@@ -605,22 +480,21 @@ exports.getAlerts = async (_req, res) => {
       WHERE se.remaining_qty > 0
         AND se.expiry_date IS NOT NULL
         AND se.expiry_date <= CURRENT_DATE + INTERVAL '30 days'
+        AND se.shop_id = $1
       ORDER BY se.expiry_date ASC
-    `, []);
+    `, [shopId]);
 
     const low_stock = await DB.PostgresAny(`
       SELECT
-        si.id,
-        si.name,
-        si.base_unit,
-        si.unit_label,
+        si.id, si.name, si.base_unit, si.unit_label,
         ROUND(si.current_qty, 2) AS current_qty,
         ROUND(si.min_qty, 2)     AS min_qty
       FROM stock_items si
       WHERE si.is_active = true
         AND si.current_qty <= si.min_qty
+        AND si.shop_id = $1
       ORDER BY si.current_qty ASC
-    `, []);
+    `, [shopId]);
 
     res.json({
       expiring,
@@ -634,23 +508,19 @@ exports.getAlerts = async (_req, res) => {
   }
 };
 
-
-/* ─────────────────────────────────────────────────────────
-   STOCK LOGS  — NEW (separate page, all movements)
-   GET /stock/logs?product_id=X&action=STOCK_IN
-   ───────────────────────────────────────────────────────── */
 exports.getStockLogs = async (req, res) => {
   try {
     const stock_item_id = req.query.stock_item_id || req.query.product_id;
     const { action, limit = 100, offset = 0 } = req.query;
+    const shopId = req.shop_id;
 
-    const params = [];
-    const conds  = [];
+    const params = [shopId];
+    const conds  = [`sl.shop_id = $1`];
 
     if (stock_item_id) { params.push(stock_item_id); conds.push(`sl.stock_item_id = $${params.length}`); }
     if (action)        { params.push(action);         conds.push(`sl.action = $${params.length}`); }
 
-    const where = conds.length ? `WHERE ${conds.join(' AND ')}` : '';
+    const where = `WHERE ${conds.join(' AND ')}`;
 
     const data = await DB.PostgresAny(`
       SELECT
@@ -659,12 +529,8 @@ exports.getStockLogs = async (req, res) => {
         si.name           AS item_name,
         sl.change_qty,
         si.unit_label     AS unit,
-        sl.action,
-        sl.reason,
-        sl.note,
-        sl.reference_id,
-        sl.stock_entry_id,
-        sl.created_at
+        sl.action, sl.reason, sl.note,
+        sl.reference_id, sl.stock_entry_id, sl.created_at
       FROM stock_logs sl
       JOIN stock_items si ON si.id = sl.stock_item_id
       ${where}

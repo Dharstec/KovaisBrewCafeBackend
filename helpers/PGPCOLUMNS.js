@@ -5,6 +5,7 @@ const columns = [
     "u.user_name",
     "u.password",
     "u.email",
+    "u.shop_id",
     "r.role_type",
     "r.role_behaviour",
     "r.menu",

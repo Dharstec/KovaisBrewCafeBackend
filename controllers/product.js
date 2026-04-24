@@ -1,61 +1,45 @@
 const DB = require("../middleware/dbFunctions");
 
 /* =========================================================
-   PRODUCTS = MENU ITEMS only
-   (Latte, Tea, Snacks, Coke, etc.)
-
-   NO stock fields here.
-   Raw materials live in stock_items table.
+   PRODUCTS  — menu items (scoped per shop)
    ========================================================= */
 
-
-/* ─────────────────────────────────────────────────────────
-   BILLING PRODUCT LIST  (lean, for billing screen)
-   ───────────────────────────────────────────────────────── */
 exports.getAllProductsBilling = async (req, res) => {
   try {
     const { search, category_id } = req.query;
+    const shopId = req.shop_id;
 
+    const params = [shopId];
     let query = `
       SELECT
-        p.id,
-        p.name,
-        p.price,
-        p.zomato_price,
-        p.swiggy_price,
-        p.zomato_packing,
-        p.swiggy_packing,
-        p.image_url,
-        p.category_id,
-        p.is_manual_price,
-        c.name AS category,
-        p.stock_item_id,
-        EXISTS(SELECT 1 FROM product_recipes pr WHERE pr.sale_product_id = p.id) AS has_recipe,
+        p.id, p.name, p.price,
+        p.zomato_price, p.swiggy_price,
+        p.zomato_packing, p.swiggy_packing,
+        p.image_url, p.category_id, p.is_manual_price,
+        c.name AS category, p.stock_item_id,
+        EXISTS(SELECT 1 FROM product_recipes pr WHERE pr.sale_product_id = p.id AND pr.shop_id = $1) AS has_recipe,
         CASE
-          -- Recipe-based: min servings across all ingredients
-          WHEN EXISTS(SELECT 1 FROM product_recipes pr WHERE pr.sale_product_id = p.id)
+          WHEN EXISTS(SELECT 1 FROM product_recipes pr WHERE pr.sale_product_id = p.id AND pr.shop_id = $1)
           THEN (
             SELECT MIN(FLOOR(si.current_qty / NULLIF(pr.used_qty, 0)))
             FROM product_recipes pr
             JOIN stock_items si ON si.id = COALESCE(pr.stock_item_id, pr.raw_product_id)
-            WHERE pr.sale_product_id = p.id
+            WHERE pr.sale_product_id = p.id AND pr.shop_id = $1 AND si.shop_id = $1
           )
-          -- Direct stock link: 1 unit sold = 1 stock unit deducted
           WHEN p.stock_item_id IS NOT NULL
           THEN (
             SELECT FLOOR(si.current_qty)
             FROM stock_items si
-            WHERE si.id = p.stock_item_id AND si.is_active = true
+            WHERE si.id = p.stock_item_id AND si.is_active = true AND si.shop_id = $1
           )
-          -- No tracking
           ELSE NULL
         END AS servings_possible
       FROM products p
       JOIN categories c ON c.id = p.category_id
-      WHERE p.is_active   = true
-        AND p.is_sellable = true`;
+      WHERE p.is_active = true
+        AND p.is_sellable = true
+        AND p.shop_id = $1`;
 
-    const params = [];
     if (search) {
       params.push(`%${search.toLowerCase()}%`);
       query += ` AND LOWER(p.name) LIKE $${params.length}`;
@@ -73,20 +57,17 @@ exports.getAllProductsBilling = async (req, res) => {
   }
 };
 
-
-/* ─────────────────────────────────────────────────────────
-   LIST ALL PRODUCTS  (admin page, paginated)
-   ───────────────────────────────────────────────────────── */
 exports.getAllProducts = async (req, res) => {
   try {
     const { search = '', category_id, page = 1, limit = 10 } = req.query;
+    const shopId = req.shop_id;
 
     const pageNo   = Number(page);
     const pageSize = Number(limit);
     const offset   = (pageNo - 1) * pageSize;
 
-    let where = `WHERE p.is_active = true`;
-    const params = [];
+    const params = [shopId];
+    let where = `WHERE p.is_active = true AND p.shop_id = $1`;
 
     if (search) {
       params.push(`%${search.toLowerCase()}%`);
@@ -99,24 +80,18 @@ exports.getAllProducts = async (req, res) => {
 
     const products = await DB.PostgresAny(`
       SELECT
-        p.id,
-        p.name,
-        p.price,
-        p.zomato_price,
-        p.swiggy_price,
-        p.zomato_packing,
-        p.swiggy_packing,
-        p.image_url,
-        p.category_id,
-        p.is_sellable,
-        p.is_manual_price,
-        p.is_active,
+        p.id, p.name, p.price,
+        p.zomato_price, p.swiggy_price,
+        p.zomato_packing, p.swiggy_packing,
+        p.image_url, p.category_id,
+        p.is_sellable, p.is_manual_price, p.is_active,
         p.stock_item_id,
         c.name AS category_name,
         si.name AS stock_item_name,
         (SELECT COUNT(*) FROM product_recipes pr
          WHERE pr.sale_product_id = p.id
            AND COALESCE(pr.stock_item_id, pr.raw_product_id) IS NOT NULL
+           AND pr.shop_id = $1
         ) AS recipe_count
       FROM products p
       LEFT JOIN categories c ON c.id = p.category_id
@@ -144,10 +119,6 @@ exports.getAllProducts = async (req, res) => {
   }
 };
 
-
-/* ─────────────────────────────────────────────────────────
-   GET PRODUCT BY ID
-   ───────────────────────────────────────────────────────── */
 exports.getProductById = async (req, res) => {
   try {
     const data = await DB.PostgresAny(`
@@ -160,8 +131,8 @@ exports.getProductById = async (req, res) => {
       FROM products p
       LEFT JOIN categories c ON c.id = p.category_id
       LEFT JOIN stock_items si ON si.id = p.stock_item_id
-      WHERE p.id = $1
-    `, [Number(req.params.id)]);
+      WHERE p.id = $1 AND p.shop_id = $2
+    `, [Number(req.params.id), req.shop_id]);
 
     if (!data.length) return res.status(404).json({ msg: "Product not found" });
     res.json(data[0]);
@@ -171,26 +142,14 @@ exports.getProductById = async (req, res) => {
   }
 };
 
-
-/* ─────────────────────────────────────────────────────────
-   CREATE PRODUCT
-   Required: name, category_id
-   Sellable products also need: price (or is_manual_price=true)
-   ───────────────────────────────────────────────────────── */
 exports.createProduct = async (req, res) => {
   try {
     const {
-      name,
-      category_id,
-      price,
-      zomato_price,
-      swiggy_price,
-      zomato_packing,
-      swiggy_packing,
-      image_url,
-      stock_item_id,
-      is_sellable     = true,
-      is_manual_price = false
+      name, category_id, price,
+      zomato_price, swiggy_price,
+      zomato_packing, swiggy_packing,
+      image_url, stock_item_id,
+      is_sellable = true, is_manual_price = false
     } = req.body;
 
     if (!name || !category_id) {
@@ -213,7 +172,8 @@ exports.createProduct = async (req, res) => {
       is_sellable:     !!is_sellable,
       is_manual_price: !!is_manual_price,
       base_unit:       'pcs',
-      is_active:       true
+      is_active:       true,
+      shop_id:         req.shop_id
     });
 
     res.status(201).json({ success: true, product });
@@ -223,10 +183,6 @@ exports.createProduct = async (req, res) => {
   }
 };
 
-
-/* ─────────────────────────────────────────────────────────
-   UPDATE PRODUCT
-   ───────────────────────────────────────────────────────── */
 exports.updateProduct = async (req, res) => {
   try {
     const { name, category_id, price, zomato_price, swiggy_price, zomato_packing, swiggy_packing, image_url, stock_item_id, is_sellable, is_manual_price, is_active } = req.body;
@@ -251,7 +207,7 @@ exports.updateProduct = async (req, res) => {
       return res.status(400).json({ msg: "No fields to update" });
     }
 
-    const updated = await DB.PostgresUpdate("products", payload, { id: Number(req.params.id) });
+    const updated = await DB.PostgresUpdate("products", payload, { id: Number(req.params.id), shop_id: req.shop_id });
     if (!updated) return res.status(404).json({ msg: "Product not found" });
 
     res.json({ success: true, message: "Product updated" });
@@ -261,22 +217,18 @@ exports.updateProduct = async (req, res) => {
   }
 };
 
-
-/* ─────────────────────────────────────────────────────────
-   TOGGLE ACTIVE / INACTIVE
-   ───────────────────────────────────────────────────────── */
 exports.toggleProduct = async (req, res) => {
   try {
     const product = await DB.PostgresAny(
-      `SELECT id, is_active FROM products WHERE id = $1`,
-      [Number(req.params.id)]
+      `SELECT id, is_active FROM products WHERE id = $1 AND shop_id = $2`,
+      [Number(req.params.id), req.shop_id]
     );
     if (!product.length) return res.status(404).json({ msg: "Product not found" });
 
     const updated = await DB.PostgresUpdate(
       "products",
       { is_active: !product[0].is_active, updated_at: new Date() },
-      { id: Number(req.params.id) }
+      { id: Number(req.params.id), shop_id: req.shop_id }
     );
     res.json({ success: true, is_active: updated.is_active });
   } catch (err) {
@@ -285,16 +237,12 @@ exports.toggleProduct = async (req, res) => {
   }
 };
 
-
-/* ─────────────────────────────────────────────────────────
-   DELETE PRODUCT  (soft delete)
-   ───────────────────────────────────────────────────────── */
 exports.deleteProduct = async (req, res) => {
   try {
     const updated = await DB.PostgresUpdate(
       "products",
       { is_active: false, updated_at: new Date() },
-      { id: Number(req.params.id) }
+      { id: Number(req.params.id), shop_id: req.shop_id }
     );
     if (!updated) return res.status(404).json({ msg: "Product not found" });
     res.json({ success: true, message: "Product deleted" });
@@ -304,19 +252,13 @@ exports.deleteProduct = async (req, res) => {
   }
 };
 
-
-/* ─────────────────────────────────────────────────────────
-   RECIPE — get ingredients (links to stock_items)
-   ───────────────────────────────────────────────────────── */
 exports.getRecipeByProduct = async (req, res) => {
   try {
     const data = await DB.PostgresAny(`
       SELECT
-        pr.id,
-        pr.stock_item_id,
+        pr.id, pr.stock_item_id,
         si.name  AS stock_item_name,
-        si.base_unit,
-        si.unit_label,
+        si.base_unit, si.unit_label,
         pr.used_qty,
         ROUND(si.current_qty, 2) AS current_qty,
         FLOOR(si.current_qty / NULLIF(pr.used_qty, 0)) AS servings_from_this
@@ -324,8 +266,9 @@ exports.getRecipeByProduct = async (req, res) => {
       JOIN stock_items si ON si.id = pr.stock_item_id
       WHERE pr.sale_product_id = $1
         AND pr.stock_item_id IS NOT NULL
+        AND pr.shop_id = $2
       ORDER BY si.name
-    `, [req.params.sale_product_id]);
+    `, [req.params.sale_product_id, req.shop_id]);
     res.json(data);
   } catch (err) {
     console.error("Get recipe error:", err);
@@ -333,32 +276,28 @@ exports.getRecipeByProduct = async (req, res) => {
   }
 };
 
-
-/* ─────────────────────────────────────────────────────────
-   RECIPE — save ingredients (replaces all rows)
-   items: [{ stock_item_id, used_qty }]
-   ───────────────────────────────────────────────────────── */
 exports.saveRecipe = async (req, res) => {
   try {
     const { sale_product_id, items } = req.body;
+    const shopId = req.shop_id;
 
     if (!sale_product_id || !Array.isArray(items)) {
       return res.status(400).json({ msg: "sale_product_id and items[] required" });
     }
 
     await DB.PostgresAny(
-      `DELETE FROM product_recipes WHERE sale_product_id = $1`,
-      [sale_product_id]
+      `DELETE FROM product_recipes WHERE sale_product_id = $1 AND shop_id = $2`,
+      [sale_product_id, shopId]
     );
 
     for (const item of items) {
-      // Accept raw_product_id (frontend field name) or stock_item_id (new field name)
       const stock_item_id = item.stock_item_id || item.raw_product_id;
       if (!stock_item_id || !item.used_qty) continue;
       await DB.PostgresInsert("product_recipes", {
         sale_product_id,
         stock_item_id,
-        used_qty: Number(item.used_qty)
+        used_qty: Number(item.used_qty),
+        shop_id: shopId
       });
     }
 
@@ -369,13 +308,12 @@ exports.saveRecipe = async (req, res) => {
   }
 };
 
-
-/* ─────────────────────────────────────────────────────────
-   RECIPE — delete single ingredient row
-   ───────────────────────────────────────────────────────── */
 exports.deleteRecipe = async (req, res) => {
   try {
-    await DB.PostgresAny(`DELETE FROM product_recipes WHERE id = $1`, [req.params.id]);
+    await DB.PostgresAny(
+      `DELETE FROM product_recipes WHERE id = $1 AND shop_id = $2`,
+      [req.params.id, req.shop_id]
+    );
     res.json({ success: true });
   } catch (err) {
     console.error("Delete recipe error:", err);

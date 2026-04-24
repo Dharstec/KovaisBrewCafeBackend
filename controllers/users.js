@@ -96,10 +96,11 @@ const login = async (req, res) => {
                 email: existingUser.email,
                 user_id: existingUser.id,
                 role_type: existingUser.role_type,
+                shop_id: existingUser.shop_id ?? null,
             },
             SECRET_CODE,
             {
-                expiresIn: isAdmin ? '10d' : '10d'   
+                expiresIn: isAdmin ? '10d' : '10d'
             }
         );
 

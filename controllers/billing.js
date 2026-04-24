@@ -1,24 +1,19 @@
 const DB = require("../middleware/dbFunctions");
 
 /* =========================================================
-   HELPER — FIFO deduction from stock_entries
-   Consumes nearest-expiry batches first (oldest expiry → oldest purchase).
-   Writes USAGE_RESERVED logs per entry for reversibility on cancel.
-   Also updates stock_items.current_qty.
+   HELPER — FIFO deduction from stock_entries (per shop)
    ========================================================= */
-async function _deductStockItem(client, stockItemId, totalUsed, billId, note) {
-  /* Deduct from stock_items.current_qty */
+async function _deductStockItem(client, stockItemId, totalUsed, billId, note, shopId) {
   await client.query(
-    `UPDATE stock_items SET current_qty = current_qty - $1, updated_at = NOW() WHERE id = $2`,
-    [totalUsed, stockItemId]
+    `UPDATE stock_items SET current_qty = current_qty - $1, updated_at = NOW() WHERE id = $2 AND shop_id = $3`,
+    [totalUsed, stockItemId, shopId]
   );
 
-  /* FIFO deduction from stock_entries */
   const batches = await client.query(
     `SELECT id, remaining_qty FROM stock_entries
-     WHERE stock_item_id = $1 AND remaining_qty > 0
+     WHERE stock_item_id = $1 AND remaining_qty > 0 AND shop_id = $2
      ORDER BY expiry_date ASC NULLS LAST, purchase_date ASC, created_at ASC`,
-    [stockItemId]
+    [stockItemId, shopId]
   );
 
   let remaining = totalUsed;
@@ -30,47 +25,45 @@ async function _deductStockItem(client, stockItemId, totalUsed, billId, note) {
       [deduct, batch.id]
     );
     await client.query(
-      `INSERT INTO stock_logs (stock_item_id, stock_entry_id, change_qty, action, reference_id, note)
-       VALUES ($1, $2, $3, 'USAGE_RESERVED', $4, $5)`,
-      [stockItemId, batch.id, -deduct, billId, note]
+      `INSERT INTO stock_logs (stock_item_id, stock_entry_id, change_qty, action, reference_id, note, shop_id)
+       VALUES ($1, $2, $3, 'USAGE_RESERVED', $4, $5, $6)`,
+      [stockItemId, batch.id, -deduct, billId, note, shopId]
     );
     remaining -= deduct;
   }
 
-  /* No entries: log against item only (stock_entry_id = NULL) */
   if (batches.rows.length === 0) {
     await client.query(
-      `INSERT INTO stock_logs (stock_item_id, stock_entry_id, change_qty, action, reference_id, note)
-       VALUES ($1, NULL, $2, 'USAGE_RESERVED', $3, $4)`,
-      [stockItemId, -totalUsed, billId, note]
+      `INSERT INTO stock_logs (stock_item_id, stock_entry_id, change_qty, action, reference_id, note, shop_id)
+       VALUES ($1, NULL, $2, 'USAGE_RESERVED', $3, $4, $5)`,
+      [stockItemId, -totalUsed, billId, note, shopId]
     );
   }
 }
 
-async function _deductStock(client, items, billId) {
+async function _deductStock(client, items, billId, shopId) {
   for (const i of items) {
-    /* 1. Direct stock link — buy-and-sell products (Coke, packets, etc.) */
     const productRow = await client.query(
-      `SELECT stock_item_id FROM products WHERE id = $1`,
-      [i.productId]
+      `SELECT stock_item_id FROM products WHERE id = $1 AND shop_id = $2`,
+      [i.productId, shopId]
     );
     const directItemId = productRow.rows[0]?.stock_item_id;
 
     if (directItemId) {
       await _deductStockItem(
         client, directItemId, Number(i.qty), billId,
-        `Reserved for bill #${billId} — direct stock`
+        `Reserved for bill #${billId} — direct stock`, shopId
       );
       continue;
     }
 
-    /* 2. Recipe-based — made-to-order products (Latte, food, etc.) */
     const recipes = await client.query(
       `SELECT COALESCE(stock_item_id, raw_product_id) AS stock_item_id, used_qty
        FROM product_recipes
        WHERE sale_product_id = $1
-         AND COALESCE(stock_item_id, raw_product_id) IS NOT NULL`,
-      [i.productId]
+         AND COALESCE(stock_item_id, raw_product_id) IS NOT NULL
+         AND shop_id = $2`,
+      [i.productId, shopId]
     );
 
     if (recipes.rows.length > 0) {
@@ -78,21 +71,17 @@ async function _deductStock(client, items, billId) {
         const totalUsed = Number(r.used_qty) * Number(i.qty);
         await _deductStockItem(
           client, r.stock_item_id, totalUsed, billId,
-          `Reserved for bill #${billId} — ingredient`
+          `Reserved for bill #${billId} — ingredient`, shopId
         );
       }
     }
-    /* 3. No link and no recipe → no stock deduction (services / untracked items) */
   }
 }
 
 /* =========================================================
-   HELPER — restore stock on cancel
-   Reverses both stock_items.current_qty and
-   stock_entries.remaining_qty using the USAGE_RESERVED logs.
+   HELPER — restore stock on cancel (shop-scoped via bill)
    ========================================================= */
 async function _restoreStock(client, billId) {
-  /* Read all USAGE_RESERVED logs — covers both recipe and direct-stock items */
   const logs = await client.query(
     `SELECT stock_item_id, stock_entry_id, change_qty FROM stock_logs
      WHERE reference_id = $1 AND action = 'USAGE_RESERVED'`,
@@ -101,21 +90,18 @@ async function _restoreStock(client, billId) {
 
   if (!logs.rows.length) return;
 
-  /* Restore stock_items.current_qty — group by stock_item_id */
   const itemMap = {};
   for (const log of logs.rows) {
     const k = String(log.stock_item_id);
-    itemMap[k] = (itemMap[k] || 0) + Number(log.change_qty); // negative
+    itemMap[k] = (itemMap[k] || 0) + Number(log.change_qty);
   }
   for (const [id, changeQty] of Object.entries(itemMap)) {
-    /* change_qty is negative, subtract it → adds back */
     await client.query(
       `UPDATE stock_items SET current_qty = current_qty - $1, updated_at = NOW() WHERE id = $2`,
       [changeQty, id]
     );
   }
 
-  /* Restore stock_entries.remaining_qty */
   for (const log of logs.rows) {
     if (!log.stock_entry_id) continue;
     await client.query(
@@ -124,7 +110,6 @@ async function _restoreStock(client, billId) {
     );
   }
 
-  /* Promote USAGE_RESERVED → RETURN */
   await client.query(
     `UPDATE stock_logs SET action = 'RETURN', note = CONCAT('Cancelled — ', note)
      WHERE reference_id = $1 AND action = 'USAGE_RESERVED'`,
@@ -132,11 +117,6 @@ async function _restoreStock(client, billId) {
   );
 }
 
-/* =========================================================
-   HELPER — finalise logs when bill completes
-   Promotes USAGE_RESERVED → USAGE (already written at create time).
-   No new entry needed — just flip the action.
-   ========================================================= */
 async function _writeCompletionLogs(client, billId) {
   await client.query(
     `UPDATE stock_logs SET action = 'USAGE', note = REPLACE(note, 'Reserved for', 'Used for')
@@ -146,12 +126,11 @@ async function _writeCompletionLogs(client, billId) {
 }
 
 /* =========================================================
-   CREATE BILL (PENDING) + RESERVE STOCK
-   Stock is deducted immediately to prevent double-selling.
-   Stock_logs are written only when the bill is COMPLETED.
+   CREATE BILL
    ========================================================= */
 exports.createBill = async (req, res) => {
   const client = await DB.getClient();
+  const shopId = req.shop_id;
 
   try {
     const { items, customer_name, local_id, platform, bill_date } = req.body;
@@ -161,11 +140,10 @@ exports.createBill = async (req, res) => {
       return res.status(400).json({ code: "INVALID_ITEMS", message: "Items array required" });
     }
 
-    /* Idempotency: same local_id → return existing bill */
     if (local_id) {
       const existing = await client.query(
-        `SELECT id, grand_total FROM bills WHERE local_id = $1`,
-        [local_id]
+        `SELECT id, grand_total FROM bills WHERE local_id = $1 AND shop_id = $2`,
+        [local_id, shopId]
       );
       if (existing.rows.length) {
         client.release();
@@ -175,23 +153,21 @@ exports.createBill = async (req, res) => {
 
     await client.query("BEGIN");
 
-    /* 1️⃣  PRE-VALIDATE STOCK — no DB changes yet */
     for (const i of items) {
       if (!i.productId || !i.name || isNaN(Number(i.price)) || Number(i.price) < 0 || !i.qty) {
         throw { code: "INVALID_ITEM_DATA", message: "Invalid item data", product: i.name };
       }
 
-      /* Check direct stock link first */
       const productRow = await client.query(
-        `SELECT stock_item_id FROM products WHERE id = $1`,
-        [i.productId]
+        `SELECT stock_item_id FROM products WHERE id = $1 AND shop_id = $2`,
+        [i.productId, shopId]
       );
       const directItemId = productRow.rows[0]?.stock_item_id;
 
       if (directItemId) {
         const stock = await client.query(
-          `SELECT current_qty, name FROM stock_items WHERE id = $1 AND is_active = true`,
-          [directItemId]
+          `SELECT current_qty, name FROM stock_items WHERE id = $1 AND is_active = true AND shop_id = $2`,
+          [directItemId, shopId]
         );
         if (!stock.rows.length || stock.rows[0].current_qty < i.qty) {
           throw {
@@ -204,19 +180,19 @@ exports.createBill = async (req, res) => {
         continue;
       }
 
-      /* Recipe-based stock check */
       const recipes = await client.query(
         `SELECT COALESCE(stock_item_id, raw_product_id) AS stock_item_id, used_qty
          FROM product_recipes
          WHERE sale_product_id = $1
-           AND COALESCE(stock_item_id, raw_product_id) IS NOT NULL`,
-        [i.productId]
+           AND COALESCE(stock_item_id, raw_product_id) IS NOT NULL
+           AND shop_id = $2`,
+        [i.productId, shopId]
       );
       for (const r of recipes.rows) {
         const totalUsed = r.used_qty * i.qty;
         const raw = await client.query(
-          `SELECT current_qty, name FROM stock_items WHERE id = $1 AND is_active = true`,
-          [r.stock_item_id]
+          `SELECT current_qty, name FROM stock_items WHERE id = $1 AND is_active = true AND shop_id = $2`,
+          [r.stock_item_id, shopId]
         );
         if (!raw.rows.length || raw.rows[0].current_qty < totalUsed) {
           throw {
@@ -230,28 +206,25 @@ exports.createBill = async (req, res) => {
       }
     }
 
-    /* 2️⃣  CREATE BILL */
     const billRes = await client.query(
-      `INSERT INTO bills (customer_name, status, grand_total, local_id, platform, created_at)
-       VALUES ($1, 'PENDING', 0, $2, $3, COALESCE($4::timestamptz, NOW())) RETURNING id`,
-      [customer_name, local_id || null, platform || null, createdAt || null]
+      `INSERT INTO bills (customer_name, status, grand_total, local_id, platform, created_at, shop_id)
+       VALUES ($1, 'PENDING', 0, $2, $3, COALESCE($4::timestamptz, NOW()), $5) RETURNING id`,
+      [customer_name, local_id || null, platform || null, createdAt || null, shopId]
     );
     const billId = billRes.rows[0].id;
     let total = 0;
 
-    /* 3️⃣  INSERT ITEMS + DEDUCT STOCK (no logs yet — written at complete) */
     for (const i of items) {
       await client.query(
-        `INSERT INTO bill_items (bill_id, product_id, product_name, price, qty)
-         VALUES ($1,$2,$3,$4,$5)`,
-        [billId, i.productId, i.name, Number(i.price) || 0, i.qty]
+        `INSERT INTO bill_items (bill_id, product_id, product_name, price, qty, shop_id)
+         VALUES ($1,$2,$3,$4,$5,$6)`,
+        [billId, i.productId, i.name, Number(i.price) || 0, i.qty, shopId]
       );
       total += i.price * i.qty;
     }
 
-    await _deductStock(client, items, billId);
+    await _deductStock(client, items, billId, shopId);
 
-    /* 4️⃣  UPDATE TOTAL */
     await client.query(`UPDATE bills SET grand_total = $1 WHERE id = $2`, [total, billId]);
 
     await client.query("COMMIT");
@@ -272,12 +245,11 @@ exports.createBill = async (req, res) => {
 };
 
 /* =========================================================
-   UPDATE PENDING BILL  (restore → re-validate → re-apply)
-   Wrapped in a transaction so a partial failure rolls back.
-   Stock_logs still written only at completeBill.
+   UPDATE PENDING BILL
    ========================================================= */
 exports.updateBill = async (req, res) => {
   const client = await DB.getClient();
+  const shopId = req.shop_id;
   try {
     const billId = Number(req.params.id);
     const { items, customer_name } = req.body;
@@ -288,38 +260,34 @@ exports.updateBill = async (req, res) => {
 
     await client.query("BEGIN");
 
-    /* 1️⃣  Ensure PENDING */
     const bill = await client.query(
-      `SELECT id FROM bills WHERE id = $1 AND status = 'PENDING'`,
-      [billId]
+      `SELECT id FROM bills WHERE id = $1 AND status = 'PENDING' AND shop_id = $2`,
+      [billId, shopId]
     );
     if (!bill.rows.length) {
       await client.query("ROLLBACK");
       return res.status(404).json({ msg: "Pending bill not found" });
     }
 
-    /* 2️⃣  RESTORE STOCK for existing items */
     await _restoreStock(client, billId);
 
-    /* 3️⃣  DELETE OLD ITEMS */
     await client.query(`DELETE FROM bill_items WHERE bill_id = $1`, [billId]);
 
-    /* 4️⃣  PRE-VALIDATE new items */
     for (const i of items) {
       if (!i.productId || !i.name || isNaN(Number(i.price)) || Number(i.price) < 0 || !i.qty) {
         throw { code: "INVALID_ITEM_DATA", message: "Invalid item data", product: i.name };
       }
 
       const productRow = await client.query(
-        `SELECT stock_item_id FROM products WHERE id = $1`,
-        [i.productId]
+        `SELECT stock_item_id FROM products WHERE id = $1 AND shop_id = $2`,
+        [i.productId, shopId]
       );
       const directItemId = productRow.rows[0]?.stock_item_id;
 
       if (directItemId) {
         const stock = await client.query(
-          `SELECT current_qty, name FROM stock_items WHERE id = $1 AND is_active = true`,
-          [directItemId]
+          `SELECT current_qty, name FROM stock_items WHERE id = $1 AND is_active = true AND shop_id = $2`,
+          [directItemId, shopId]
         );
         if (!stock.rows.length || stock.rows[0].current_qty < i.qty) {
           throw {
@@ -336,14 +304,15 @@ exports.updateBill = async (req, res) => {
         `SELECT COALESCE(stock_item_id, raw_product_id) AS stock_item_id, used_qty
          FROM product_recipes
          WHERE sale_product_id = $1
-           AND COALESCE(stock_item_id, raw_product_id) IS NOT NULL`,
-        [i.productId]
+           AND COALESCE(stock_item_id, raw_product_id) IS NOT NULL
+           AND shop_id = $2`,
+        [i.productId, shopId]
       );
       for (const r of recipes.rows) {
         const totalUsed = r.used_qty * i.qty;
         const raw = await client.query(
-          `SELECT current_qty, name FROM stock_items WHERE id = $1 AND is_active = true`,
-          [r.stock_item_id]
+          `SELECT current_qty, name FROM stock_items WHERE id = $1 AND is_active = true AND shop_id = $2`,
+          [r.stock_item_id, shopId]
         );
         if (!raw.rows.length || raw.rows[0].current_qty < totalUsed) {
           throw {
@@ -357,20 +326,18 @@ exports.updateBill = async (req, res) => {
       }
     }
 
-    /* 5️⃣  INSERT NEW ITEMS + DEDUCT STOCK */
     let total = 0;
     for (const i of items) {
       await client.query(
-        `INSERT INTO bill_items (bill_id, product_id, product_name, price, qty)
-         VALUES ($1,$2,$3,$4,$5)`,
-        [billId, i.productId, i.name, Number(i.price) || 0, i.qty]
+        `INSERT INTO bill_items (bill_id, product_id, product_name, price, qty, shop_id)
+         VALUES ($1,$2,$3,$4,$5,$6)`,
+        [billId, i.productId, i.name, Number(i.price) || 0, i.qty, shopId]
       );
       total += Number(i.price) * Number(i.qty);
     }
 
-    await _deductStock(client, items, billId);
+    await _deductStock(client, items, billId, shopId);
 
-    /* 6️⃣  UPDATE TOTAL */
     await client.query(
       `UPDATE bills SET grand_total = $1, customer_name = $2 WHERE id = $3`,
       [total, customer_name, billId]
@@ -394,12 +361,11 @@ exports.updateBill = async (req, res) => {
 };
 
 /* =========================================================
-   COMPLETE BILL  (PENDING → COMPLETED + write stock_logs)
-   Stock was already deducted at createBill.
-   Here we only record the audit logs.
+   COMPLETE BILL
    ========================================================= */
 exports.completeBill = async (req, res) => {
   const client = await DB.getClient();
+  const shopId = req.shop_id;
   try {
     const billId = req.params.id;
     const { customer_name, payment_mode, grand_total, discount_amount = 0, bill_date } = req.body;
@@ -408,10 +374,13 @@ exports.completeBill = async (req, res) => {
     await client.query("BEGIN");
 
     const existing = await client.query(
-      `SELECT status FROM bills WHERE id = $1`,
-      [billId]
+      `SELECT status FROM bills WHERE id = $1 AND shop_id = $2`,
+      [billId, shopId]
     );
-    /* Idempotent: already completed → return success without double-logging */
+    if (!existing.rows.length) {
+      await client.query("ROLLBACK");
+      return res.status(404).json({ message: "Bill not found" });
+    }
     if (existing.rows[0]?.status === 'COMPLETED') {
       await client.query("ROLLBACK");
       return res.json({ message: "Bill already completed" });
@@ -429,7 +398,6 @@ exports.completeBill = async (req, res) => {
       [customer_name, payment_mode, Number(grand_total) || 0, Number(discount_amount) || 0, billId, createdAt || null]
     );
 
-    /* Write SALE / USAGE logs now that the sale is confirmed */
     await _writeCompletionLogs(client, billId);
 
     await client.query("COMMIT");
@@ -445,18 +413,19 @@ exports.completeBill = async (req, res) => {
 };
 
 /* =========================================================
-   CANCEL BILL  (PENDING → CANCELLED + restore stock)
+   CANCEL BILL
    ========================================================= */
 exports.cancelBill = async (req, res) => {
   const client = await DB.getClient();
+  const shopId = req.shop_id;
   try {
     const billId = req.params.id;
 
     await client.query("BEGIN");
 
     const existing = await client.query(
-      `SELECT status FROM bills WHERE id = $1`,
-      [billId]
+      `SELECT status FROM bills WHERE id = $1 AND shop_id = $2`,
+      [billId, shopId]
     );
     if (!existing.rows.length) {
       await client.query("ROLLBACK");
@@ -467,7 +436,6 @@ exports.cancelBill = async (req, res) => {
       return res.status(400).json({ message: "Only PENDING bills can be cancelled" });
     }
 
-    /* Restore stock_items + stock_entries, promote logs USAGE_RESERVED → RETURN */
     await _restoreStock(client, billId);
 
     await client.query(
@@ -492,8 +460,10 @@ exports.cancelBill = async (req, res) => {
    ========================================================= */
 exports.pendingBills = async (req, res) => {
   try {
+    const shopId = req.shop_id;
     const bills = await DB.PostgresAny(
-      `SELECT * FROM bills WHERE status = 'PENDING' ORDER BY id DESC`
+      `SELECT * FROM bills WHERE status = 'PENDING' AND shop_id = $1 ORDER BY id DESC`,
+      [shopId]
     );
     for (const b of bills) {
       b.items = await DB.PostgresAny(
@@ -509,22 +479,23 @@ exports.pendingBills = async (req, res) => {
 };
 
 /* =========================================================
-   COMPLETED BILLS  (paginated + payment summary)
+   COMPLETED BILLS
    ========================================================= */
 exports.completedBills = async (req, res) => {
   try {
+    const shopId = req.shop_id;
     const { start_date, end_date, page = 1, limit = 20, platform } = req.query;
 
     const pageNo   = Number(page);
     const pageSize = Number(limit);
     const offset   = (pageNo - 1) * pageSize;
 
-    let where  = `WHERE status = 'COMPLETED'`;
-    const params = [];
+    const params = [shopId];
+    let where = `WHERE status = 'COMPLETED' AND shop_id = $1`;
 
     if (start_date && end_date) {
       params.push(start_date, end_date);
-      where += ` AND DATE(created_at) BETWEEN $1 AND $2`;
+      where += ` AND DATE(created_at) BETWEEN $${params.length - 1} AND $${params.length}`;
     }
 
     if (platform === 'regular') {
@@ -578,11 +549,6 @@ exports.completedBills = async (req, res) => {
   }
 };
 
-/* =========================================================
-   HELPER — restore stock for an already-COMPLETED bill
-   Mirrors _restoreStock but reads USAGE logs (not USAGE_RESERVED).
-   Deletes those logs so _deductStock + _writeCompletionLogs can rewrite them.
-   ========================================================= */
 async function _restoreCompletedStock(client, billId) {
   const logs = await client.query(
     `SELECT stock_item_id, stock_entry_id, change_qty FROM stock_logs
@@ -591,7 +557,6 @@ async function _restoreCompletedStock(client, billId) {
   );
   if (!logs.rows.length) return;
 
-  /* Restore stock_items.current_qty (change_qty is negative → subtract to add back) */
   const itemMap = {};
   for (const log of logs.rows) {
     const k = String(log.stock_item_id);
@@ -604,7 +569,6 @@ async function _restoreCompletedStock(client, billId) {
     );
   }
 
-  /* Restore stock_entries.remaining_qty */
   for (const log of logs.rows) {
     if (!log.stock_entry_id) continue;
     await client.query(
@@ -613,7 +577,6 @@ async function _restoreCompletedStock(client, billId) {
     );
   }
 
-  /* Remove old USAGE logs so they can be rewritten after edit */
   await client.query(
     `DELETE FROM stock_logs WHERE reference_id = $1 AND action = 'USAGE'`,
     [billId]
@@ -621,9 +584,7 @@ async function _restoreCompletedStock(client, billId) {
 }
 
 /* =========================================================
-   EDIT COMPLETED BILL (admin only)
-   Restores stock from old items, re-deducts for new items.
-   Works for ALL completed bills — frontend restricts UI to zomato/swiggy.
+   EDIT COMPLETED BILL
    ========================================================= */
 exports.editCompletedBill = async (req, res) => {
   if (req.role_type !== 'Admin') {
@@ -631,6 +592,7 @@ exports.editCompletedBill = async (req, res) => {
   }
 
   const client = await DB.getClient();
+  const shopId = req.shop_id;
   try {
     const billId = Number(req.params.id);
     const { items, customer_name } = req.body;
@@ -642,18 +604,16 @@ exports.editCompletedBill = async (req, res) => {
     await client.query('BEGIN');
 
     const bill = await client.query(
-      `SELECT id, platform FROM bills WHERE id = $1 AND status = 'COMPLETED'`,
-      [billId]
+      `SELECT id, platform FROM bills WHERE id = $1 AND status = 'COMPLETED' AND shop_id = $2`,
+      [billId, shopId]
     );
     if (!bill.rows.length) {
       await client.query('ROLLBACK');
       return res.status(404).json({ msg: 'Completed bill not found' });
     }
 
-    /* 1. Restore stock from old items */
     await _restoreCompletedStock(client, billId);
 
-    /* 2. Replace bill items */
     await client.query(`DELETE FROM bill_items WHERE bill_id = $1`, [billId]);
 
     let total = 0;
@@ -662,20 +622,17 @@ exports.editCompletedBill = async (req, res) => {
         throw { code: 'INVALID_ITEM_DATA', message: `Invalid item: ${i.name}` };
       }
       await client.query(
-        `INSERT INTO bill_items (bill_id, product_id, product_name, price, qty)
-         VALUES ($1,$2,$3,$4,$5)`,
-        [billId, i.productId, i.name, Number(i.price) || 0, i.qty]
+        `INSERT INTO bill_items (bill_id, product_id, product_name, price, qty, shop_id)
+         VALUES ($1,$2,$3,$4,$5,$6)`,
+        [billId, i.productId, i.name, Number(i.price) || 0, i.qty, shopId]
       );
       total += Number(i.price) * Number(i.qty);
     }
 
-    /* 3. Re-deduct stock for new items */
-    await _deductStock(client, items, billId);
+    await _deductStock(client, items, billId, shopId);
 
-    /* 4. Promote USAGE_RESERVED → USAGE immediately (bill stays COMPLETED) */
     await _writeCompletionLogs(client, billId);
 
-    /* 5. Update bill total + customer name */
     await client.query(
       `UPDATE bills SET grand_total = $1, customer_name = $2 WHERE id = $3`,
       [total, customer_name || null, billId]
@@ -699,8 +656,7 @@ exports.editCompletedBill = async (req, res) => {
 };
 
 /* =========================================================
-   DELETE COMPLETED BILL (admin only)
-   Restores stock, removes bill_items + bill record.
+   DELETE COMPLETED BILL
    ========================================================= */
 exports.deleteCompletedBill = async (req, res) => {
   if (req.role_type !== 'Admin') {
@@ -708,14 +664,15 @@ exports.deleteCompletedBill = async (req, res) => {
   }
 
   const client = await DB.getClient();
+  const shopId = req.shop_id;
   try {
     const billId = Number(req.params.id);
 
     await client.query('BEGIN');
 
     const bill = await client.query(
-      `SELECT id FROM bills WHERE id = $1 AND status = 'COMPLETED'`,
-      [billId]
+      `SELECT id FROM bills WHERE id = $1 AND status = 'COMPLETED' AND shop_id = $2`,
+      [billId, shopId]
     );
     if (!bill.rows.length) {
       await client.query('ROLLBACK');
@@ -741,11 +698,11 @@ exports.deleteCompletedBill = async (req, res) => {
 };
 
 /* =========================================================
-   SYNC OFFLINE BILL — create + complete atomically
-   local_id guarantees idempotency on retry
+   SYNC OFFLINE BILL
    ========================================================= */
 exports.syncOfflineBill = async (req, res) => {
   const client = await DB.getClient();
+  const shopId = req.shop_id;
   try {
     const {
       items, customer_name, payment_mode,
@@ -757,11 +714,10 @@ exports.syncOfflineBill = async (req, res) => {
       return res.status(400).json({ msg: "Items required" });
     }
 
-    /* Idempotency */
     if (local_id) {
       const existing = await client.query(
-        `SELECT id FROM bills WHERE local_id = $1`,
-        [local_id]
+        `SELECT id FROM bills WHERE local_id = $1 AND shop_id = $2`,
+        [local_id, shopId]
       );
       if (existing.rows.length) {
         client.release();
@@ -771,10 +727,9 @@ exports.syncOfflineBill = async (req, res) => {
 
     await client.query("BEGIN");
 
-    /* Insert as COMPLETED directly */
     const billRes = await client.query(
-      `INSERT INTO bills (customer_name, status, grand_total, discount_amount, payment_mode, local_id, platform, created_at)
-       VALUES ($1,'COMPLETED',$2,$3,$4,$5,$6,COALESCE($7::timestamptz, NOW())) RETURNING id`,
+      `INSERT INTO bills (customer_name, status, grand_total, discount_amount, payment_mode, local_id, platform, created_at, shop_id)
+       VALUES ($1,'COMPLETED',$2,$3,$4,$5,$6,COALESCE($7::timestamptz, NOW()),$8) RETURNING id`,
       [
         customer_name,
         Number(grand_total) || 0,
@@ -782,24 +737,22 @@ exports.syncOfflineBill = async (req, res) => {
         payment_mode,
         local_id || null,
         platform || null,
-        createdAt || null
+        createdAt || null,
+        shopId
       ]
     );
     const billId = billRes.rows[0].id;
 
-    /* Insert items */
     for (const i of items) {
       await client.query(
-        `INSERT INTO bill_items (bill_id, product_id, product_name, price, qty)
-         VALUES ($1,$2,$3,$4,$5)`,
-        [billId, i.productId, i.name, Number(i.price) || 0, i.qty]
+        `INSERT INTO bill_items (bill_id, product_id, product_name, price, qty, shop_id)
+         VALUES ($1,$2,$3,$4,$5,$6)`,
+        [billId, i.productId, i.name, Number(i.price) || 0, i.qty, shopId]
       );
     }
 
-    /* Deduct stock via stock_items (best-effort for offline; allow negative) */
-    await _deductStock(client, items, billId);
+    await _deductStock(client, items, billId, shopId);
 
-    /* Write stock_logs (bill is already COMPLETED) */
     await _writeCompletionLogs(client, billId);
 
     await client.query("COMMIT");
