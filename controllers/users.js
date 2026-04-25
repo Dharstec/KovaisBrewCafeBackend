@@ -20,16 +20,41 @@ const createUser = async (req, res) => {
     try {
         const email = req.body.email;
         const existingUserData = await getUserByUserId(email);
-        if (!existingUserData) {
-            const password = bcrypt.hashSync(req.body.password, SALT_ROUNDS);
-            const newUser = { ...req.body, password, created_at: new Date() };
-            await POSTGRESQLService.PostgresInsert(TABLE_USERS, newUser);
-            res.json({ status: 'success', message: 'Successfully Created' });
-        } else {
-            res.status(400).json({ status: 'error', message: `User already exists with Email: ${existingUserData.email}` });
+        if (existingUserData) {
+            return res.status(400).json({ status: 'error', message: `User already exists with Email: ${existingUserData.email}` });
         }
+
+        const password = bcrypt.hashSync(req.body.password, SALT_ROUNDS);
+        const body = { ...req.body, password, created_at: new Date() };
+
+        const roleId = Number(body.role_id);
+        const role = await POSTGRESQLService.PostgresAny(
+            `SELECT role_type FROM ${TABLE_ROLES} WHERE id = $1`, [roleId]
+        );
+        const isAdminRole = role[0]?.role_type === 'Admin';
+
+        if (isAdminRole) {
+            body.shop_id = null;
+        } else {
+            const requestedShop = body.shop_id != null ? Number(body.shop_id) : null;
+            body.shop_id = requestedShop || req.shop_id || 1;
+        }
+
+        await POSTGRESQLService.PostgresInsert(TABLE_USERS, body);
+        res.json({ status: 'success', message: 'Successfully Created' });
     } catch (error) {
-        console.log(error)
+        console.log(error);
+        handleServerError(res, error);
+    }
+};
+
+const getShops = async (_req, res) => {
+    try {
+        const shops = await POSTGRESQLService.PostgresAny(
+            `SELECT id, name, code, is_active FROM shops WHERE is_active = true ORDER BY id`
+        );
+        res.json({ status: 'success', data: shops });
+    } catch (error) {
         handleServerError(res, error);
     }
 };
@@ -134,4 +159,4 @@ const verifyOtpFromUser = async (user_id, otp_code) => {
 };
 
 
-module.exports = { login, createUser };
+module.exports = { login, createUser, getShops };

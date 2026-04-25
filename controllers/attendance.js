@@ -9,6 +9,7 @@ const VALID_STATUSES = ['P', 'A', 'H', 'L', 'HL', 'WO'];
 ───────────────────────────────────────────── */
 exports.markAttendance = async (req, res) => {
   const rows = req.body;
+  const shopId = req.shop_id;
   if (!Array.isArray(rows) || rows.length === 0)
     return res.status(400).json({ message: "Invalid data" });
 
@@ -19,12 +20,11 @@ exports.markAttendance = async (req, res) => {
       if (!VALID_STATUSES.includes(r.status))
         throw new Error(`Invalid status '${r.status}'. Allowed: ${VALID_STATUSES.join(', ')}`);
 
-      // Clear check_in/check_out for statuses that don't need them
-      const hasTime = ['P', 'H', 'L'].includes(r.status);  // WO/HL/A have no times
+      const hasTime = ['P', 'H', 'L'].includes(r.status);
 
       await client.query(
-        `INSERT INTO attendance (employee_id, date, status, check_in, check_out)
-         VALUES ($1, $2, $3, $4, $5)
+        `INSERT INTO attendance (employee_id, date, status, check_in, check_out, shop_id)
+         VALUES ($1, $2, $3, $4, $5, $6)
          ON CONFLICT (employee_id, date)
          DO UPDATE SET
            status    = EXCLUDED.status,
@@ -35,7 +35,8 @@ exports.markAttendance = async (req, res) => {
           r.date,
           r.status,
           hasTime ? (r.check_in  || null) : null,
-          hasTime ? (r.check_out || null) : null
+          hasTime ? (r.check_out || null) : null,
+          shopId
         ]
       );
     }
@@ -63,9 +64,9 @@ exports.getAttendanceByDate = async (req, res) => {
        TO_CHAR(a.check_out, 'HH24:MI') AS check_out
      FROM employees e
      LEFT JOIN attendance a ON a.employee_id = e.id AND a.date = $1
-     WHERE e.is_active = true
+     WHERE e.is_active = true AND e.shop_id = $2
      ORDER BY e.name`,
-    [date]
+    [date, req.shop_id]
   );
   res.json(data);
 };
@@ -104,11 +105,12 @@ exports.getAttendanceHistory = async (req, res) => {
       FROM employees e
       JOIN attendance a ON a.employee_id = e.id
       WHERE e.is_active = true
-        AND a.date BETWEEN $1 AND $2`;
+        AND a.date BETWEEN $1 AND $2
+        AND e.shop_id = $3`;
 
-    const params = [startDate, endDate];
+    const params = [startDate, endDate, req.shop_id];
     if (employee_id) {
-      query += ` AND e.id = $3`;
+      query += ` AND e.id = $4`;
       params.push(employee_id);
     }
     query += ` ORDER BY e.name, a.date`;

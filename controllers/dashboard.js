@@ -18,8 +18,10 @@ function resolveDate(req) {
 exports.getDashboardSummary = async (req, res) => {
   try {
     const date = resolveDate(req);
+    const shopId = req.shop_id;
     const dateExpr = date ? `$1::date` : `CURRENT_DATE`;
-    const params   = date ? [date] : [];
+    const params   = date ? [date, shopId] : [shopId];
+    const shopParam = `$${params.length}`;
 
     const sales = await DB.PostgresAny(`
       SELECT
@@ -32,20 +34,25 @@ exports.getDashboardSummary = async (req, res) => {
       FROM bills
       WHERE status = 'COMPLETED'
         AND DATE(created_at) = ${dateExpr}
+        AND shop_id = ${shopParam}
     `, params);
 
     const pendingBills = await DB.PostgresAny(
-      `SELECT COUNT(*) AS pending FROM bills WHERE status = 'PENDING'`
+      `SELECT COUNT(*) AS pending FROM bills WHERE status = 'PENDING' AND shop_id = $1`,
+      [shopId]
     );
 
     const products = await DB.PostgresAny(
-      `SELECT COUNT(*) FROM products WHERE is_active = true`
+      `SELECT COUNT(*) FROM products WHERE is_active = true AND shop_id = $1`,
+      [shopId]
     );
     const categories = await DB.PostgresAny(
-      `SELECT COUNT(*) FROM categories WHERE status = true`
+      `SELECT COUNT(*) FROM categories WHERE status = true AND shop_id = $1`,
+      [shopId]
     );
     const employees = await DB.PostgresAny(
-      `SELECT COUNT(*) FROM employees WHERE is_active = true`
+      `SELECT COUNT(*) FROM employees WHERE is_active = true AND shop_id = $1`,
+      [shopId]
     );
 
     const attendance = await DB.PostgresAny(`
@@ -53,7 +60,7 @@ exports.getDashboardSummary = async (req, res) => {
         COUNT(*) FILTER (WHERE status = 'P') AS present,
         COUNT(*) FILTER (WHERE status = 'A') AS absent
       FROM attendance
-      WHERE date = ${dateExpr}
+      WHERE date = ${dateExpr} AND shop_id = ${shopParam}
     `, params);
 
     const stock = await DB.PostgresAny(`
@@ -61,9 +68,9 @@ exports.getDashboardSummary = async (req, res) => {
         COUNT(*) AS total_items,
         COUNT(*) FILTER (WHERE current_qty <= min_qty AND current_qty > 0) AS low_stock,
         COUNT(*) FILTER (WHERE current_qty <= 0) AS out_of_stock
-      FROM products
-      WHERE track_stock = true AND is_active = true
-    `);
+      FROM stock_items
+      WHERE is_active = true AND shop_id = $1
+    `, [shopId]);
 
     res.json({
       today_sales:   Number(sales[0].total_sales),
@@ -102,8 +109,10 @@ exports.getDashboardSummary = async (req, res) => {
 exports.getHourlyItemSales = async (req, res) => {
   try {
     const date = resolveDate(req);
+    const shopId = req.shop_id;
     const dateExpr = date ? `$1::date` : `CURRENT_DATE`;
-    const params   = date ? [date] : [];
+    const params   = date ? [date, shopId] : [shopId];
+    const shopParam = `$${params.length}`;
 
     const data = await DB.PostgresAny(`
       SELECT
@@ -118,6 +127,7 @@ exports.getHourlyItemSales = async (req, res) => {
       LEFT JOIN products p ON p.id = bi.product_id
       WHERE b.status = 'COMPLETED'
         AND b.created_at::DATE = ${dateExpr}
+        AND b.shop_id = ${shopParam}
       GROUP BY item_name, DATE_TRUNC('hour', b.created_at)
       ORDER BY DATE_TRUNC('hour', b.created_at)
     `, params);
@@ -139,16 +149,18 @@ exports.getItemSalesChart = async (req, res) => {
     const dateRx  = /^\d{4}-\d{2}-\d{2}$/;
     const todayStr = new Date().toISOString().slice(0, 10);
 
+    const shopId = req.shop_id;
     let whereExpr, params;
     if (req.query.startDate && req.query.endDate &&
         dateRx.test(req.query.startDate) && dateRx.test(req.query.endDate)) {
       whereExpr = `DATE(b.created_at) BETWEEN $1::date AND $2::date`;
-      params    = [req.query.startDate, req.query.endDate];
+      params    = [req.query.startDate, req.query.endDate, shopId];
     } else {
       const date = resolveDate(req) || todayStr;
       whereExpr = `DATE(b.created_at) = $1::date`;
-      params    = [date];
+      params    = [date, shopId];
     }
+    const shopParam = `$${params.length}`;
 
     const data = await DB.PostgresAny(`
       SELECT
@@ -160,6 +172,7 @@ exports.getItemSalesChart = async (req, res) => {
       LEFT JOIN products p ON p.id = bi.product_id
       WHERE b.status = 'COMPLETED'
         AND ${whereExpr}
+        AND b.shop_id = ${shopParam}
       GROUP BY item_name
       ORDER BY total_count DESC
       LIMIT 15
@@ -179,13 +192,15 @@ exports.getItemSalesChart = async (req, res) => {
 exports.getDailySpend = async (req, res) => {
   try {
     const date = resolveDate(req);
+    const shopId = req.shop_id;
     const dateExpr = date ? `$1::date` : `CURRENT_DATE`;
-    const params   = date ? [date] : [];
+    const params   = date ? [date, shopId] : [shopId];
+    const shopParam = `$${params.length}`;
 
     const total = await DB.PostgresAny(`
       SELECT COALESCE(SUM(amount), 0) AS total_spend
       FROM spent
-      WHERE date::date = ${dateExpr}
+      WHERE date::date = ${dateExpr} AND shop_id = ${shopParam}
     `, params);
 
     const breakdown = await DB.PostgresAny(`
@@ -194,7 +209,7 @@ exports.getDailySpend = async (req, res) => {
         COALESCE(SUM(amount), 0) AS total,
         COUNT(*)::INT             AS count
       FROM spent
-      WHERE date::date = ${dateExpr}
+      WHERE date::date = ${dateExpr} AND shop_id = ${shopParam}
       GROUP BY reason
       ORDER BY total DESC
     `, params);
@@ -202,7 +217,7 @@ exports.getDailySpend = async (req, res) => {
     const records = await DB.PostgresAny(`
       SELECT id, reason, amount, TO_CHAR(created_at, 'HH12:MI AM') AS time
       FROM spent
-      WHERE date::date = ${dateExpr}
+      WHERE date::date = ${dateExpr} AND shop_id = ${shopParam}
       ORDER BY created_at DESC
     `, params);
 
@@ -229,6 +244,7 @@ exports.getRangeSummary = async (req, res) => {
     const start = (s && dateRx.test(s)) ? s : new Date(new Date().setDate(new Date().getDate() - 30)).toISOString().slice(0, 10);
     const end   = (e && dateRx.test(e)) ? e : new Date().toISOString().slice(0, 10);
 
+    const shopId = req.shop_id;
     const sales = await DB.PostgresAny(`
       SELECT
         COALESCE(SUM(grand_total), 0)  AS total_sales,
@@ -238,13 +254,14 @@ exports.getRangeSummary = async (req, res) => {
       FROM bills
       WHERE status = 'COMPLETED'
         AND DATE(created_at) BETWEEN $1::date AND $2::date
-    `, [start, end]);
+        AND shop_id = $3
+    `, [start, end, shopId]);
 
     const spend = await DB.PostgresAny(`
       SELECT COALESCE(SUM(amount), 0) AS total_spend
       FROM spent
-      WHERE date::date BETWEEN $1::date AND $2::date
-    `, [start, end]);
+      WHERE date::date BETWEEN $1::date AND $2::date AND shop_id = $3
+    `, [start, end, shopId]);
 
     const dailySales = await DB.PostgresAny(`
       SELECT
@@ -254,19 +271,20 @@ exports.getRangeSummary = async (req, res) => {
       FROM bills
       WHERE status = 'COMPLETED'
         AND DATE(created_at) BETWEEN $1::date AND $2::date
+        AND shop_id = $3
       GROUP BY DATE(created_at)
       ORDER BY day
-    `, [start, end]);
+    `, [start, end, shopId]);
 
     const dailySpend = await DB.PostgresAny(`
       SELECT
         date::date                    AS day,
         COALESCE(SUM(amount), 0)      AS spend
       FROM spent
-      WHERE date::date BETWEEN $1::date AND $2::date
+      WHERE date::date BETWEEN $1::date AND $2::date AND shop_id = $3
       GROUP BY date::date
       ORDER BY day
-    `, [start, end]);
+    `, [start, end, shopId]);
 
     const spendBreakdown = await DB.PostgresAny(`
       SELECT
@@ -274,10 +292,10 @@ exports.getRangeSummary = async (req, res) => {
         COALESCE(SUM(amount), 0) AS total,
         COUNT(*)::INT             AS count
       FROM spent
-      WHERE date::date BETWEEN $1::date AND $2::date
+      WHERE date::date BETWEEN $1::date AND $2::date AND shop_id = $3
       GROUP BY reason
       ORDER BY total DESC
-    `, [start, end]);
+    `, [start, end, shopId]);
 
     res.json({
       start, end,
@@ -304,8 +322,10 @@ exports.getRangeSummary = async (req, res) => {
 exports.getPaymentBreakdown = async (req, res) => {
   try {
     const date = resolveDate(req);
+    const shopId = req.shop_id;
     const dateExpr = date ? `$1::date` : `CURRENT_DATE`;
-    const params   = date ? [date] : [];
+    const params   = date ? [date, shopId] : [shopId];
+    const shopParam = `$${params.length}`;
 
     const data = await DB.PostgresAny(`
       SELECT
@@ -315,6 +335,7 @@ exports.getPaymentBreakdown = async (req, res) => {
       FROM bills
       WHERE status = 'COMPLETED'
         AND DATE(created_at) = ${dateExpr}
+        AND shop_id = ${shopParam}
       GROUP BY payment_mode
       ORDER BY payment_mode
     `, params);

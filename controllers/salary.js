@@ -23,34 +23,32 @@ exports.previewSalary = async (req, res) => {
     const end     = `${month}-${String(lastDay).padStart(2, '0')}`;
     const totalDays = lastDay;
 
-    // 1. Get all active employees with salary info
+    const shopId = req.shop_id;
     const employees = await DB.PostgresAny(
-      `SELECT id, name, salary_amount FROM employees WHERE is_active = true ORDER BY name`
+      `SELECT id, name, salary_amount FROM employees WHERE is_active = true AND shop_id = $1 ORDER BY name`,
+      [shopId]
     );
 
-    // 2. Attendance counts per employee for the month
     const attRows = await DB.PostgresAny(
       `SELECT employee_id, status, COUNT(*) AS cnt
        FROM attendance
-       WHERE date BETWEEN $1 AND $2
+       WHERE date BETWEEN $1 AND $2 AND shop_id = $3
        GROUP BY employee_id, status`,
-      [start, end]
+      [start, end, shopId]
     );
 
-    // 3. Advance totals per employee for the month
     const advRows = await DB.PostgresAny(
       `SELECT employee_id, COALESCE(SUM(amount::numeric), 0) AS total_advance
        FROM employee_advance
-       WHERE TO_CHAR(advance_date, 'YYYY-MM') = $1
+       WHERE TO_CHAR(advance_date, 'YYYY-MM') = $1 AND shop_id = $2
        GROUP BY employee_id`,
-      [month]
+      [month, shopId]
     );
 
-    // 4. Check already-finalized records
     const finalRows = await DB.PostgresAny(
       `SELECT employee_id, finalized, net_payable, advance_deduction
-       FROM salary_records WHERE month = $1`,
-      [month]
+       FROM salary_records WHERE month = $1 AND shop_id = $2`,
+      [month, shopId]
     );
 
     // Build lookup maps
@@ -137,16 +135,16 @@ exports.finalizeSalary = async (req, res) => {
   const end     = `${month}-${String(lastDay).padStart(2, '0')}`;
   const totalDays = lastDay;
 
+  const shopId = req.shop_id;
   const client = await DB.getClient();
   try {
     await client.query("BEGIN");
 
-    // Attendance counts
     const attRows = await client.query(
       `SELECT employee_id, status, COUNT(*) AS cnt
-       FROM attendance WHERE date BETWEEN $1 AND $2
+       FROM attendance WHERE date BETWEEN $1 AND $2 AND shop_id = $3
        GROUP BY employee_id, status`,
-      [start, end]
+      [start, end, shopId]
     );
 
     const attMap = {};
@@ -157,7 +155,8 @@ exports.finalizeSalary = async (req, res) => {
 
     for (const e of employees) {
       const empRow = await client.query(
-        `SELECT salary_amount FROM employees WHERE id = $1`, [e.employee_id]
+        `SELECT salary_amount FROM employees WHERE id = $1 AND shop_id = $2`,
+        [e.employee_id, shopId]
       );
       if (!empRow.rows.length) continue;
 
@@ -186,8 +185,8 @@ exports.finalizeSalary = async (req, res) => {
            (employee_id, month, base_salary, total_days, present_days, absent_days,
             half_days, late_days, holiday_days, daily_rate,
             absent_deduction, half_deduction, advance_deduction, net_payable,
-            finalized, finalized_at)
-         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,true,NOW())
+            finalized, finalized_at, shop_id)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,true,NOW(),$15)
          ON CONFLICT (employee_id, month) DO UPDATE SET
            base_salary       = EXCLUDED.base_salary,
            total_days        = EXCLUDED.total_days,
@@ -206,7 +205,7 @@ exports.finalizeSalary = async (req, res) => {
         [
           e.employee_id, month, base, totalDays, presentDays, absentDays,
           halfDays, lateDays, holidayDays, parseFloat(dailyRate.toFixed(2)),
-          absentDeduction, halfDeduction, adv, netPayable
+          absentDeduction, halfDeduction, adv, netPayable, shopId
         ]
       );
     }
@@ -233,10 +232,10 @@ exports.getSalaryHistory = async (req, res) => {
       SELECT sr.*, e.name AS employee_name
       FROM salary_records sr
       JOIN employees e ON e.id = sr.employee_id
-      WHERE sr.finalized = true`;
-    const params = [];
+      WHERE sr.finalized = true AND sr.shop_id = $1`;
+    const params = [req.shop_id];
     if (employee_id) {
-      query += ` AND sr.employee_id = $1`;
+      query += ` AND sr.employee_id = $2`;
       params.push(employee_id);
     }
     query += ` ORDER BY sr.month DESC, e.name`;
@@ -256,7 +255,8 @@ exports.getSalaryHistory = async (req, res) => {
 exports.getSalaryMonths = async (req, res) => {
   try {
     const rows = await DB.PostgresAny(
-      `SELECT DISTINCT month FROM salary_records WHERE finalized = true ORDER BY month DESC`
+      `SELECT DISTINCT month FROM salary_records WHERE finalized = true AND shop_id = $1 ORDER BY month DESC`,
+      [req.shop_id]
     );
     res.json(rows.map(r => r.month));
   } catch (err) {
