@@ -35,6 +35,12 @@ exports.getTodayCount = async (req, res) => {
         ROUND(si.current_qty, 2) AS system_qty,
         ROUND(COALESCE(prev.closing_qty, si.current_qty), 2) AS opening_qty,
         ROUND(COALESCE(pur.purchased, 0), 2) AS purchase_qty,
+        ROUND(COALESCE(billed.billed_qty, 0), 2) AS billed_qty,
+        ROUND(
+          COALESCE(prev.closing_qty, si.current_qty)
+          + COALESCE(pur.purchased, 0)
+          - COALESCE(billed.billed_qty, 0),
+        2) AS expected_closing,
         sc.id            AS count_id,
         sc.closing_qty,
         sc.variance,
@@ -53,6 +59,20 @@ exports.getTodayCount = async (req, res) => {
         FROM stock_entries
         WHERE stock_item_id = si.id AND shop_id = $1 AND purchase_date = $2::date
       ) pur ON true
+      LEFT JOIN LATERAL (
+        SELECT COALESCE(SUM(
+          bi.qty * COALESCE(pr.used_qty, 1)
+        ), 0) AS billed_qty
+        FROM bill_items bi
+        JOIN bills b ON b.id = bi.bill_id
+        LEFT JOIN product_recipes pr
+          ON pr.sale_product_id = bi.product_id
+         AND pr.stock_item_id   = si.id
+        WHERE b.shop_id = $1
+          AND DATE(b.created_at AT TIME ZONE 'Asia/Kolkata') = $2::date
+          AND b.status IN ('COMPLETED', 'PENDING')
+          AND pr.stock_item_id IS NOT NULL
+      ) billed ON true
       LEFT JOIN stock_counts sc
         ON sc.stock_item_id = si.id
        AND sc.shop_id       = $1
