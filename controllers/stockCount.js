@@ -60,17 +60,28 @@ exports.getTodayCount = async (req, res) => {
         WHERE stock_item_id = si.id AND shop_id = $1 AND purchase_date = $2::date
       ) pur ON true
       LEFT JOIN LATERAL (
-        SELECT COALESCE(SUM(
-          bi.qty * COALESCE(pr.used_qty, 1)
-        ), 0) AS billed_qty
-        FROM bill_items bi
-        JOIN bills b ON b.id = bi.bill_id
-        JOIN product_recipes pr
-          ON pr.sale_product_id = bi.product_id
-         AND COALESCE(pr.stock_item_id, pr.raw_product_id) = si.id
-        WHERE b.shop_id = $1
-          AND DATE(b.created_at AT TIME ZONE 'Asia/Kolkata') = $2::date
-          AND b.status IN ('COMPLETED', 'PENDING')
+        SELECT COALESCE(SUM(qty_used), 0) AS billed_qty
+        FROM (
+          SELECT CAST(bi.qty * COALESCE(pr.used_qty, 1) AS numeric) AS qty_used
+          FROM bill_items bi
+          JOIN bills b ON b.id = bi.bill_id
+          JOIN product_recipes pr
+            ON pr.sale_product_id = bi.product_id
+           AND COALESCE(pr.stock_item_id, pr.raw_product_id) = si.id
+          WHERE b.shop_id = $1
+            AND DATE(b.created_at AT TIME ZONE 'Asia/Kolkata') = $2::date
+            AND b.status = 'COMPLETED'
+          UNION ALL
+          SELECT CAST(bi.qty AS numeric) AS qty_used
+          FROM bill_items bi
+          JOIN bills b ON b.id = bi.bill_id
+          JOIN products p ON p.id = bi.product_id
+                          AND p.stock_item_id = si.id
+                          AND p.shop_id = $1
+          WHERE b.shop_id = $1
+            AND DATE(b.created_at AT TIME ZONE 'Asia/Kolkata') = $2::date
+            AND b.status = 'COMPLETED'
+        ) combined
       ) billed ON true
       LEFT JOIN stock_counts sc
         ON sc.stock_item_id = si.id

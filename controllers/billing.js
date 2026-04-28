@@ -157,53 +157,6 @@ exports.createBill = async (req, res) => {
       if (!i.productId || !i.name || isNaN(Number(i.price)) || Number(i.price) < 0 || !i.qty) {
         throw { code: "INVALID_ITEM_DATA", message: "Invalid item data", product: i.name };
       }
-
-      const productRow = await client.query(
-        `SELECT stock_item_id FROM products WHERE id = $1 AND shop_id = $2`,
-        [i.productId, shopId]
-      );
-      const directItemId = productRow.rows[0]?.stock_item_id;
-
-      if (directItemId) {
-        const stock = await client.query(
-          `SELECT current_qty, name FROM stock_items WHERE id = $1 AND is_active = true AND shop_id = $2`,
-          [directItemId, shopId]
-        );
-        if (!stock.rows.length || stock.rows[0].current_qty < i.qty) {
-          throw {
-            code:      "INSUFFICIENT_STOCK",
-            product:   i.name,
-            required:  i.qty,
-            available: stock.rows[0]?.current_qty || 0
-          };
-        }
-        continue;
-      }
-
-      const recipes = await client.query(
-        `SELECT COALESCE(stock_item_id, raw_product_id) AS stock_item_id, used_qty
-         FROM product_recipes
-         WHERE sale_product_id = $1
-           AND COALESCE(stock_item_id, raw_product_id) IS NOT NULL
-           AND shop_id = $2`,
-        [i.productId, shopId]
-      );
-      for (const r of recipes.rows) {
-        const totalUsed = r.used_qty * i.qty;
-        const raw = await client.query(
-          `SELECT current_qty, name FROM stock_items WHERE id = $1 AND is_active = true AND shop_id = $2`,
-          [r.stock_item_id, shopId]
-        );
-        if (!raw.rows.length || raw.rows[0].current_qty < totalUsed) {
-          throw {
-            code:         "INSUFFICIENT_RAW_STOCK",
-            product:      i.name,
-            raw_material: raw.rows[0]?.name || "Unknown",
-            required:     totalUsed,
-            available:    raw.rows[0]?.current_qty || 0
-          };
-        }
-      }
     }
 
     const billRes = await client.query(
@@ -220,10 +173,8 @@ exports.createBill = async (req, res) => {
          VALUES ($1,$2,$3,$4,$5,$6)`,
         [billId, i.productId, i.name, Number(i.price) || 0, i.qty, shopId]
       );
-      total += i.price * i.qty;
+      total += Number(i.price) * Number(i.qty);
     }
-
-    await _deductStock(client, items, billId, shopId);
 
     await client.query(`UPDATE bills SET grand_total = $1 WHERE id = $2`, [total, billId]);
 
@@ -269,65 +220,13 @@ exports.updateBill = async (req, res) => {
       return res.status(404).json({ msg: "Pending bill not found" });
     }
 
-    await _restoreStock(client, billId);
-
     await client.query(`DELETE FROM bill_items WHERE bill_id = $1`, [billId]);
 
+    let total = 0;
     for (const i of items) {
       if (!i.productId || !i.name || isNaN(Number(i.price)) || Number(i.price) < 0 || !i.qty) {
         throw { code: "INVALID_ITEM_DATA", message: "Invalid item data", product: i.name };
       }
-
-      const productRow = await client.query(
-        `SELECT stock_item_id FROM products WHERE id = $1 AND shop_id = $2`,
-        [i.productId, shopId]
-      );
-      const directItemId = productRow.rows[0]?.stock_item_id;
-
-      if (directItemId) {
-        const stock = await client.query(
-          `SELECT current_qty, name FROM stock_items WHERE id = $1 AND is_active = true AND shop_id = $2`,
-          [directItemId, shopId]
-        );
-        if (!stock.rows.length || stock.rows[0].current_qty < i.qty) {
-          throw {
-            code:      "INSUFFICIENT_STOCK",
-            product:   i.name,
-            required:  i.qty,
-            available: stock.rows[0]?.current_qty || 0
-          };
-        }
-        continue;
-      }
-
-      const recipes = await client.query(
-        `SELECT COALESCE(stock_item_id, raw_product_id) AS stock_item_id, used_qty
-         FROM product_recipes
-         WHERE sale_product_id = $1
-           AND COALESCE(stock_item_id, raw_product_id) IS NOT NULL
-           AND shop_id = $2`,
-        [i.productId, shopId]
-      );
-      for (const r of recipes.rows) {
-        const totalUsed = r.used_qty * i.qty;
-        const raw = await client.query(
-          `SELECT current_qty, name FROM stock_items WHERE id = $1 AND is_active = true AND shop_id = $2`,
-          [r.stock_item_id, shopId]
-        );
-        if (!raw.rows.length || raw.rows[0].current_qty < totalUsed) {
-          throw {
-            code:         "INSUFFICIENT_RAW_STOCK",
-            product:      i.name,
-            raw_material: raw.rows[0]?.name || "Unknown",
-            required:     totalUsed,
-            available:    raw.rows[0]?.current_qty || 0
-          };
-        }
-      }
-    }
-
-    let total = 0;
-    for (const i of items) {
       await client.query(
         `INSERT INTO bill_items (bill_id, product_id, product_name, price, qty, shop_id)
          VALUES ($1,$2,$3,$4,$5,$6)`,
@@ -335,8 +234,6 @@ exports.updateBill = async (req, res) => {
       );
       total += Number(i.price) * Number(i.qty);
     }
-
-    await _deductStock(client, items, billId, shopId);
 
     await client.query(
       `UPDATE bills SET grand_total = $1, customer_name = $2 WHERE id = $3`,
@@ -386,6 +283,67 @@ exports.completeBill = async (req, res) => {
       return res.json({ message: "Bill already completed" });
     }
 
+    /* Load bill items for stock validation + deduction */
+    const billItemsRes = await client.query(
+      `SELECT product_id AS "productId", product_name AS name, price, qty
+       FROM bill_items WHERE bill_id = $1`,
+      [billId]
+    );
+    const items = billItemsRes.rows;
+
+    /* Validate stock */
+    for (const i of items) {
+      const productRow = await client.query(
+        `SELECT stock_item_id FROM products WHERE id = $1 AND shop_id = $2`,
+        [i.productId, shopId]
+      );
+      const directItemId = productRow.rows[0]?.stock_item_id;
+
+      if (directItemId) {
+        const stock = await client.query(
+          `SELECT current_qty, name FROM stock_items WHERE id = $1 AND is_active = true AND shop_id = $2`,
+          [directItemId, shopId]
+        );
+        if (!stock.rows.length || Number(stock.rows[0].current_qty) < Number(i.qty)) {
+          throw {
+            code:      "INSUFFICIENT_STOCK",
+            product:   i.name,
+            required:  i.qty,
+            available: stock.rows[0]?.current_qty || 0
+          };
+        }
+        continue;
+      }
+
+      const recipes = await client.query(
+        `SELECT COALESCE(stock_item_id, raw_product_id) AS stock_item_id, used_qty
+         FROM product_recipes
+         WHERE sale_product_id = $1
+           AND COALESCE(stock_item_id, raw_product_id) IS NOT NULL
+           AND shop_id = $2`,
+        [i.productId, shopId]
+      );
+      for (const r of recipes.rows) {
+        const totalUsed = Number(r.used_qty) * Number(i.qty);
+        const raw = await client.query(
+          `SELECT current_qty, name FROM stock_items WHERE id = $1 AND is_active = true AND shop_id = $2`,
+          [r.stock_item_id, shopId]
+        );
+        if (!raw.rows.length || Number(raw.rows[0].current_qty) < totalUsed) {
+          throw {
+            code:         "INSUFFICIENT_RAW_STOCK",
+            product:      i.name,
+            raw_material: raw.rows[0]?.name || "Unknown",
+            required:     totalUsed,
+            available:    raw.rows[0]?.current_qty || 0
+          };
+        }
+      }
+    }
+
+    /* Deduct stock now that bill is confirmed complete */
+    await _deductStock(client, items, billId, shopId);
+
     await client.query(
       `UPDATE bills
        SET customer_name    = $1,
@@ -406,7 +364,7 @@ exports.completeBill = async (req, res) => {
   } catch (err) {
     await client.query("ROLLBACK");
     console.error("Complete bill error:", err);
-    res.status(500).json({ error: err.message });
+    res.status(400).json({ success: false, code: err.code || "COMPLETE_FAILED", message: err.message || "Bill completion failed", details: err });
   } finally {
     client.release();
   }
@@ -436,15 +394,13 @@ exports.cancelBill = async (req, res) => {
       return res.status(400).json({ message: "Only PENDING bills can be cancelled" });
     }
 
-    await _restoreStock(client, billId);
-
     await client.query(
       `UPDATE bills SET status = 'CANCELLED' WHERE id = $1`,
       [billId]
     );
 
     await client.query("COMMIT");
-    res.json({ message: "Bill cancelled and stock restored" });
+    res.json({ message: "Bill cancelled" });
 
   } catch (err) {
     await client.query("ROLLBACK");
