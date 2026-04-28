@@ -256,16 +256,17 @@ exports.getRecipeByProduct = async (req, res) => {
   try {
     const data = await DB.PostgresAny(`
       SELECT
-        pr.id, pr.stock_item_id,
+        pr.id,
+        COALESCE(pr.stock_item_id, pr.raw_product_id) AS stock_item_id,
         si.name  AS stock_item_name,
         si.base_unit, si.unit_label,
         pr.used_qty,
         ROUND(si.current_qty, 2) AS current_qty,
         FLOOR(si.current_qty / NULLIF(pr.used_qty, 0)) AS servings_from_this
       FROM product_recipes pr
-      JOIN stock_items si ON si.id = pr.stock_item_id
+      JOIN stock_items si ON si.id = COALESCE(pr.stock_item_id, pr.raw_product_id)
       WHERE pr.sale_product_id = $1
-        AND pr.stock_item_id IS NOT NULL
+        AND COALESCE(pr.stock_item_id, pr.raw_product_id) IS NOT NULL
         AND pr.shop_id = $2
       ORDER BY si.name
     `, [req.params.sale_product_id, req.shop_id]);
@@ -291,10 +292,10 @@ exports.saveRecipe = async (req, res) => {
     );
 
     for (const item of items) {
-      const stock_item_id = item.stock_item_id || item.raw_product_id;
-      if (!stock_item_id || !item.used_qty) continue;
+      const stock_item_id = Number(item.stock_item_id || item.raw_product_id);
+      if (!stock_item_id || isNaN(stock_item_id) || !item.used_qty) continue;
       await DB.PostgresInsert("product_recipes", {
-        sale_product_id,
+        sale_product_id: Number(sale_product_id),
         stock_item_id,
         used_qty: Number(item.used_qty),
         shop_id: shopId
