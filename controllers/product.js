@@ -172,6 +172,7 @@ exports.createProduct = async (req, res) => {
       is_sellable:     !!is_sellable,
       is_manual_price: !!is_manual_price,
       base_unit:       'pcs',
+      unit_label:      'pcs',
       is_active:       true,
       shop_id:         req.shop_id
     });
