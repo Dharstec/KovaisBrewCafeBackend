@@ -65,13 +65,12 @@ exports.getTodayCount = async (req, res) => {
         ), 0) AS billed_qty
         FROM bill_items bi
         JOIN bills b ON b.id = bi.bill_id
-        LEFT JOIN product_recipes pr
+        JOIN product_recipes pr
           ON pr.sale_product_id = bi.product_id
-         AND pr.stock_item_id   = si.id
+         AND COALESCE(pr.stock_item_id, pr.raw_product_id) = si.id
         WHERE b.shop_id = $1
           AND DATE(b.created_at AT TIME ZONE 'Asia/Kolkata') = $2::date
           AND b.status IN ('COMPLETED', 'PENDING')
-          AND pr.stock_item_id IS NOT NULL
       ) billed ON true
       LEFT JOIN stock_counts sc
         ON sc.stock_item_id = si.id
