@@ -126,6 +126,130 @@ async function _writeCompletionLogs(client, billId) {
 }
 
 /* =========================================================
+   HELPER — validate stock for a list of cart/bill items
+   Aggregates qty per product, then collects EVERY shortfall
+   (does not short-circuit) so the UI can show the full picture.
+   Returns { ok, shortfall: [{ product_id, product_name,
+     required, available, unit_label?, type: 'direct'|'recipe',
+     ingredients?: [{ stock_item_id, name, required, available, unit_label }]
+   }] }.
+   ========================================================= */
+async function _validateStockForItems(client, items, shopId) {
+  const aggregated = new Map();
+  for (const it of items || []) {
+    const pid = Number(it.productId);
+    const qty = Number(it.qty);
+    if (!pid || !qty || qty <= 0) continue;
+    const prev = aggregated.get(pid);
+    aggregated.set(pid, {
+      productId: pid,
+      name: it.name || prev?.name || `#${pid}`,
+      qty: (prev?.qty || 0) + qty
+    });
+  }
+
+  const shortfall = [];
+
+  for (const i of aggregated.values()) {
+    const productRow = await client.query(
+      `SELECT stock_item_id FROM products WHERE id = $1 AND shop_id = $2`,
+      [i.productId, shopId]
+    );
+    const directItemId = productRow.rows[0]?.stock_item_id;
+
+    if (directItemId) {
+      const stock = await client.query(
+        `SELECT current_qty, name, unit_label, base_unit
+         FROM stock_items WHERE id = $1 AND is_active = true AND shop_id = $2`,
+        [directItemId, shopId]
+      );
+      const available = Number(stock.rows[0]?.current_qty ?? 0);
+      if (!stock.rows.length || available < Number(i.qty)) {
+        shortfall.push({
+          product_id:   i.productId,
+          product_name: i.name,
+          type:         'direct',
+          required:     Number(i.qty),
+          available,
+          unit_label:   stock.rows[0]?.unit_label || stock.rows[0]?.base_unit || ''
+        });
+      }
+      continue;
+    }
+
+    const recipes = await client.query(
+      `SELECT COALESCE(pr.stock_item_id, pr.raw_product_id) AS stock_item_id,
+              pr.used_qty,
+              si.name        AS stock_item_name,
+              si.current_qty AS stock_current_qty,
+              si.is_active   AS stock_is_active,
+              si.unit_label,
+              si.base_unit
+         FROM product_recipes pr
+         LEFT JOIN stock_items si
+                ON si.id = COALESCE(pr.stock_item_id, pr.raw_product_id)
+        WHERE pr.sale_product_id = $1
+          AND COALESCE(pr.stock_item_id, pr.raw_product_id) IS NOT NULL
+          AND pr.shop_id = $2`,
+      [i.productId, shopId]
+    );
+
+    if (!recipes.rows.length) continue;
+
+    const insufficient = [];
+    for (const r of recipes.rows) {
+      const totalUsed = Number(r.used_qty) * Number(i.qty);
+      // Treat missing or deactivated stock items as zero-available so they
+      // surface in the shortfall report (matches the original strict behavior).
+      const inactive  = r.stock_is_active === false || r.stock_is_active === null;
+      const available = inactive ? 0 : Number(r.stock_current_qty ?? 0);
+      if (available < totalUsed) {
+        insufficient.push({
+          stock_item_id: r.stock_item_id,
+          name:          r.stock_item_name || 'Unknown',
+          required:      totalUsed,
+          available,
+          unit_label:    r.unit_label || r.base_unit || ''
+        });
+      }
+    }
+
+    if (insufficient.length) {
+      shortfall.push({
+        product_id:   i.productId,
+        product_name: i.name,
+        type:         'recipe',
+        required:     Number(i.qty),
+        ingredients:  insufficient
+      });
+    }
+  }
+
+  return { ok: shortfall.length === 0, shortfall };
+}
+
+/* =========================================================
+   PRE-FLIGHT STOCK CHECK
+   ========================================================= */
+exports.checkStock = async (req, res) => {
+  const client = await DB.getClient();
+  const shopId = req.shop_id;
+  try {
+    const { items } = req.body || {};
+    if (!Array.isArray(items) || !items.length) {
+      return res.json({ ok: true, shortfall: [] });
+    }
+    const result = await _validateStockForItems(client, items, shopId);
+    res.json(result);
+  } catch (err) {
+    console.error("Check stock error:", err);
+    res.status(500).json({ ok: false, message: err.message || "Stock check failed", shortfall: [] });
+  } finally {
+    client.release();
+  }
+};
+
+/* =========================================================
    CREATE BILL
    ========================================================= */
 exports.createBill = async (req, res) => {
@@ -291,54 +415,14 @@ exports.completeBill = async (req, res) => {
     );
     const items = billItemsRes.rows;
 
-    /* Validate stock */
-    for (const i of items) {
-      const productRow = await client.query(
-        `SELECT stock_item_id FROM products WHERE id = $1 AND shop_id = $2`,
-        [i.productId, shopId]
-      );
-      const directItemId = productRow.rows[0]?.stock_item_id;
-
-      if (directItemId) {
-        const stock = await client.query(
-          `SELECT current_qty, name FROM stock_items WHERE id = $1 AND is_active = true AND shop_id = $2`,
-          [directItemId, shopId]
-        );
-        if (!stock.rows.length || Number(stock.rows[0].current_qty) < Number(i.qty)) {
-          throw {
-            code:      "INSUFFICIENT_STOCK",
-            product:   i.name,
-            required:  i.qty,
-            available: stock.rows[0]?.current_qty || 0
-          };
-        }
-        continue;
-      }
-
-      const recipes = await client.query(
-        `SELECT COALESCE(stock_item_id, raw_product_id) AS stock_item_id, used_qty
-         FROM product_recipes
-         WHERE sale_product_id = $1
-           AND COALESCE(stock_item_id, raw_product_id) IS NOT NULL
-           AND shop_id = $2`,
-        [i.productId, shopId]
-      );
-      for (const r of recipes.rows) {
-        const totalUsed = Number(r.used_qty) * Number(i.qty);
-        const raw = await client.query(
-          `SELECT current_qty, name FROM stock_items WHERE id = $1 AND is_active = true AND shop_id = $2`,
-          [r.stock_item_id, shopId]
-        );
-        if (!raw.rows.length || Number(raw.rows[0].current_qty) < totalUsed) {
-          throw {
-            code:         "INSUFFICIENT_RAW_STOCK",
-            product:      i.name,
-            raw_material: raw.rows[0]?.name || "Unknown",
-            required:     totalUsed,
-            available:    raw.rows[0]?.current_qty || 0
-          };
-        }
-      }
+    /* Validate stock — collects all shortfalls so the UI can show the full picture */
+    const stockCheck = await _validateStockForItems(client, items, shopId);
+    if (!stockCheck.ok) {
+      throw {
+        code:      "INSUFFICIENT_STOCK",
+        message:   "One or more items are out of stock",
+        shortfall: stockCheck.shortfall
+      };
     }
 
     /* Deduct stock now that bill is confirmed complete */
