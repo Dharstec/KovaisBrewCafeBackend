@@ -157,6 +157,13 @@ exports.saveCount = async (req, res) => {
       return res.status(403).json({ message: "Cashier can only save today's count" });
     }
 
+    // Lock policy:
+    //  - Admin saves are authoritative → row is locked (cashier cannot overwrite).
+    //  - Cashier saves stay unlocked so the cashier can keep editing the same
+    //    row through the day (typos, late count corrections, etc.).
+    //    Admin can still unlock/re-lock via the unlockRow endpoint.
+    const lockOnSave = !!isAdmin;
+
     await client.query("BEGIN");
 
     for (const i of items) {
@@ -236,16 +243,16 @@ exports.saveCount = async (req, res) => {
         await client.query(
           `UPDATE stock_counts
            SET closing_qty = $1, variance = $2, note = COALESCE($3, note),
-               counted_by = $4, updated_at = NOW(), locked = true
+               counted_by = $4, updated_at = NOW(), locked = $6
            WHERE id = $5`,
-          [closing, variance, i.note || null, userId, existing.rows[0].id]
+          [closing, variance, i.note || null, userId, existing.rows[0].id, lockOnSave]
         );
       } else {
         await client.query(
           `INSERT INTO stock_counts
              (shop_id, stock_item_id, count_date, opening_qty, closing_qty, variance, counted_by, locked, note)
-           VALUES ($1,$2,$3,$4,$5,$6,$7,true,$8)`,
-          [shopId, stockItemId, date, opening, closing, variance, userId, i.note || null]
+           VALUES ($1,$2,$3,$4,$5,$6,$7,$9,$8)`,
+          [shopId, stockItemId, date, opening, closing, variance, userId, i.note || null, lockOnSave]
         );
       }
 
