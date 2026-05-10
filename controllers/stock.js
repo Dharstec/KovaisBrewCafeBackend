@@ -369,6 +369,9 @@ exports.deleteStockEntry = async (req, res) => {
 
     await client.query("BEGIN");
 
+    // Nullify FK reference before deleting (stock_logs.stock_entry_id → stock_entries.id)
+    await client.query(`UPDATE stock_logs SET stock_entry_id = NULL WHERE stock_entry_id = $1`, [id]);
+
     await client.query(`DELETE FROM stock_entries WHERE id = $1 AND shop_id = $2`, [id, shopId]);
 
     if (reverseQty > 0) {
@@ -443,7 +446,7 @@ exports.getStockEntries = async (req, res) => {
     `, [...params, pageSize, offset]);
 
     const count = await DB.PostgresAny(
-      `SELECT COUNT(*) AS total FROM stock_entries se ${where}`, params
+      `SELECT COUNT(*) AS total FROM stock_entries se JOIN stock_items si ON si.id = se.stock_item_id ${where}`, params
     );
 
     res.json({
