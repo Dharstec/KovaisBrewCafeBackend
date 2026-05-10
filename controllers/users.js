@@ -125,7 +125,7 @@ const login = async (req, res) => {
             },
             SECRET_CODE,
             {
-                expiresIn: isAdmin ? '10d' : '10d'
+                expiresIn: '365d'
             }
         );
 
