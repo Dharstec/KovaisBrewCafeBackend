@@ -117,13 +117,14 @@ exports.addStockEntry = async (req, res) => {
     }
 
     const item = await DB.PostgresAny(
-      `SELECT id, name, base_unit, unit_label, unit_value FROM stock_items WHERE id = $1 AND shop_id = $2`,
+      `SELECT id, name, base_unit, unit_label FROM stock_items WHERE id = $1 AND shop_id = $2`,
       [stock_item_id, shopId]
     );
     if (!item.length) return res.status(404).json({ message: "Stock item not found" });
 
-    const { unit_value, unit_label, base_unit, name } = item[0];
-    const base_qty = Number(qty) * Number(unit_value);
+    const { unit_label, base_unit, name } = item[0];
+    // qty is already the total in the item's unit (frontend sends packs × qty_per_pack)
+    const base_qty = Number(qty);
 
     await client.query("BEGIN");
 
@@ -205,12 +206,12 @@ exports.addStockEntryBulk = async (req, res) => {
     }
 
     const item = await DB.PostgresAny(
-      `SELECT id, name, base_unit, unit_label, unit_value FROM stock_items WHERE id = $1 AND shop_id = $2`,
+      `SELECT id, name, base_unit, unit_label FROM stock_items WHERE id = $1 AND shop_id = $2`,
       [stock_item_id, shopId]
     );
     if (!item.length) return res.status(404).json({ message: "Stock item not found" });
 
-    const { unit_value, unit_label, base_unit, name } = item[0];
+    const { unit_label, base_unit, name } = item[0];
     const today = new Date().toISOString().split('T')[0];
     const pDate = purchase_date || today;
 
@@ -220,7 +221,8 @@ exports.addStockEntryBulk = async (req, res) => {
     const addedEntries = [];
 
     for (const e of entries) {
-      const base_qty = Number(e.qty) * Number(unit_value);
+      // qty is already the total in the item's unit (packs × qty_per_pack computed by caller)
+      const base_qty = Number(e.qty);
       totalBaseQty += base_qty;
 
       const entryRes = await client.query(`
@@ -347,10 +349,56 @@ exports.updateStockEntry = async (req, res) => {
   }
 };
 
+exports.deleteStockEntry = async (req, res) => {
+  const client = await DB.getClient();
+  try {
+    const id     = Number(req.params.id);
+    const shopId = req.shop_id;
+
+    const entry = await DB.PostgresAny(
+      `SELECT se.*, si.name AS item_name, si.unit_label
+       FROM stock_entries se
+       JOIN stock_items si ON si.id = se.stock_item_id
+       WHERE se.id = $1 AND se.shop_id = $2`,
+      [id, shopId]
+    );
+    if (!entry.length) return res.status(404).json({ message: "Entry not found" });
+
+    const e          = entry[0];
+    const reverseQty = Number(e.remaining_qty);
+
+    await client.query("BEGIN");
+
+    await client.query(`DELETE FROM stock_entries WHERE id = $1 AND shop_id = $2`, [id, shopId]);
+
+    if (reverseQty > 0) {
+      await client.query(`
+        UPDATE stock_items SET current_qty = current_qty - $1, updated_at = NOW()
+        WHERE id = $2 AND shop_id = $3
+      `, [reverseQty, e.stock_item_id, shopId]);
+
+      await client.query(`
+        INSERT INTO stock_logs (stock_item_id, change_qty, action, note, shop_id)
+        VALUES ($1, $2, 'ADJUSTMENT', $3, $4)
+      `, [e.stock_item_id, -reverseQty,
+          `Purchase entry #${id} deleted (reversed ${reverseQty} ${e.unit_label})`, shopId]);
+    }
+
+    await client.query("COMMIT");
+    res.json({ message: "Entry deleted", reversed_qty: reverseQty });
+  } catch (err) {
+    await client.query("ROLLBACK");
+    console.error("Delete stock entry error:", err);
+    res.status(500).json({ message: "Failed to delete entry" });
+  } finally {
+    client.release();
+  }
+};
+
 exports.getStockEntries = async (req, res) => {
   try {
     const stock_item_id = req.query.stock_item_id || req.query.product_id;
-    const { page = 1, limit = 20 } = req.query;
+    const { page = 1, limit = 20, search } = req.query;
     const shopId = req.shop_id;
 
     const pageNo   = Number(page);
@@ -362,6 +410,11 @@ exports.getStockEntries = async (req, res) => {
     if (stock_item_id) {
       params.push(stock_item_id);
       where += ` AND se.stock_item_id = $${params.length}`;
+    }
+    if (search) {
+      params.push(`%${search}%`);
+      const idx = params.length;
+      where += ` AND (si.name ILIKE $${idx} OR se.supplier ILIKE $${idx} OR se.batch_no ILIKE $${idx})`;
     }
 
     const entries = await DB.PostgresAny(`

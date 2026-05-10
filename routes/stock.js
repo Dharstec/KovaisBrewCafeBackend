@@ -13,6 +13,7 @@ router.post("/stock/add-bulk",     verifyToken, c.addStockEntryBulk);    // mult
 /* ── Stock entries (purchase history / price tracking) ── */
 router.get("/stock/entries",          verifyToken, c.getStockEntries);      // all entries (?stock_item_id=X)
 router.patch("/stock/entries/:id",    verifyToken, c.updateStockEntry);     // update expiry/batch/supplier/notes
+router.delete("/stock/entries/:id",   verifyToken, c.deleteStockEntry);     // delete entry + reverse remaining qty
 router.get("/stock/price-history/:stock_item_id", verifyToken, c.getPriceHistory); // price trend for one item
 
 /* ── Expiry alerts ── */
