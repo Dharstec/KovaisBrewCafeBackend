@@ -58,3 +58,11 @@ exports.requireAdmin = (req, res, next) => {
   }
   next();
 };
+
+/* Admin or Manager guard — use after verifyToken */
+exports.requireAdminOrManager = (req, res, next) => {
+  if (req.role_type !== 'Admin' && req.role_type !== 'Manager') {
+    return res.status(403).json({ message: 'Admin or Manager access required' });
+  }
+  next();
+};

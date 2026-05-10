@@ -140,7 +140,7 @@ exports.getTodayCount = async (req, res) => {
 exports.saveCount = async (req, res) => {
   const client = await DB.getClient();
   const shopId = req.shop_id;
-  const isAdmin = req.role_type === 'Admin';
+  const isAdmin = req.role_type === 'Admin' || req.role_type === 'Manager';
   const userId = req.user_id;
 
   try {
@@ -368,8 +368,8 @@ exports.quickAddItem = async (req, res) => {
 /* POST /stock-count/unlock/:id  (admin) — let cashier re-edit */
 exports.unlockRow = async (req, res) => {
   try {
-    if (req.role_type !== 'Admin') {
-      return res.status(403).json({ message: "Admin only" });
+    if (req.role_type !== 'Admin' && req.role_type !== 'Manager') {
+      return res.status(403).json({ message: "Admin or Manager access required" });
     }
     await DB.PostgresAny(
       `UPDATE stock_counts SET locked = false, updated_at = NOW()
