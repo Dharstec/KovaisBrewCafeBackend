@@ -43,6 +43,7 @@ async function _deductStockItem(client, stockItemId, totalUsed, billId, note, sh
 
 async function _deductStock(client, items, billId, shopId) {
   for (const i of items) {
+    if (!i.productId) continue; // add-on items have no product — skip stock deduction
     const productRow = await client.query(
       `SELECT stock_item_id FROM products WHERE id = $1 AND shop_id = $2`,
       [i.productId, shopId]
@@ -278,7 +279,8 @@ exports.createBill = async (req, res) => {
     await client.query("BEGIN");
 
     for (const i of items) {
-      if (!i.productId || !i.name || isNaN(Number(i.price)) || Number(i.price) < 0 || !i.qty) {
+      const hasProduct = i.productId != null;
+      if ((hasProduct && !i.productId) || !i.name || isNaN(Number(i.price)) || Number(i.price) < 0 || !i.qty) {
         throw { code: "INVALID_ITEM_DATA", message: "Invalid item data", product: i.name };
       }
     }
@@ -348,13 +350,14 @@ exports.updateBill = async (req, res) => {
 
     let total = 0;
     for (const i of items) {
-      if (!i.productId || !i.name || isNaN(Number(i.price)) || Number(i.price) < 0 || !i.qty) {
+      const hasProduct = i.productId != null;
+      if ((hasProduct && !i.productId) || !i.name || isNaN(Number(i.price)) || Number(i.price) < 0 || !i.qty) {
         throw { code: "INVALID_ITEM_DATA", message: "Invalid item data", product: i.name };
       }
       await client.query(
         `INSERT INTO bill_items (bill_id, product_id, product_name, price, qty, shop_id)
          VALUES ($1,$2,$3,$4,$5,$6)`,
-        [billId, i.productId, i.name, Number(i.price) || 0, i.qty, shopId]
+        [billId, i.productId || null, i.name, Number(i.price) || 0, i.qty, shopId]
       );
       total += Number(i.price) * Number(i.qty);
     }
@@ -658,13 +661,14 @@ exports.editCompletedBill = async (req, res) => {
 
     let total = 0;
     for (const i of items) {
-      if (!i.productId || !i.name || isNaN(Number(i.price)) || Number(i.price) < 0 || !i.qty) {
+      const hasProduct = i.productId != null;
+      if ((hasProduct && !i.productId) || !i.name || isNaN(Number(i.price)) || Number(i.price) < 0 || !i.qty) {
         throw { code: 'INVALID_ITEM_DATA', message: `Invalid item: ${i.name}` };
       }
       await client.query(
         `INSERT INTO bill_items (bill_id, product_id, product_name, price, qty, shop_id)
          VALUES ($1,$2,$3,$4,$5,$6)`,
-        [billId, i.productId, i.name, Number(i.price) || 0, i.qty, shopId]
+        [billId, i.productId || null, i.name, Number(i.price) || 0, i.qty, shopId]
       );
       total += Number(i.price) * Number(i.qty);
     }
