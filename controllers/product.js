@@ -15,7 +15,6 @@ exports.getAllProductsBilling = async (req, res) => {
         p.id, p.name, p.price,
         p.zomato_price, p.swiggy_price,
         p.zomato_packing, p.swiggy_packing,
-        p.zomato_addon, p.swiggy_addon,
         p.image_url, p.category_id, p.is_manual_price,
         c.name AS category, p.stock_item_id,
         EXISTS(SELECT 1 FROM product_recipes pr WHERE pr.sale_product_id = p.id AND pr.shop_id = $1) AS has_recipe,
@@ -84,7 +83,6 @@ exports.getAllProducts = async (req, res) => {
         p.id, p.name, p.price,
         p.zomato_price, p.swiggy_price,
         p.zomato_packing, p.swiggy_packing,
-        p.zomato_addon, p.swiggy_addon,
         p.image_url, p.category_id,
         p.is_sellable, p.is_manual_price, p.is_active,
         p.stock_item_id,
@@ -126,7 +124,6 @@ exports.getProductById = async (req, res) => {
     const data = await DB.PostgresAny(`
       SELECT p.id, p.name, p.price, p.zomato_price, p.swiggy_price,
              p.zomato_packing, p.swiggy_packing,
-             p.zomato_addon, p.swiggy_addon,
              p.image_url, p.category_id, p.stock_item_id,
              p.is_sellable, p.is_manual_price, p.is_active,
              c.name AS category_name,
@@ -151,7 +148,6 @@ exports.createProduct = async (req, res) => {
       name, category_id, price,
       zomato_price, swiggy_price,
       zomato_packing, swiggy_packing,
-      zomato_addon, swiggy_addon,
       image_url, stock_item_id,
       is_sellable = true, is_manual_price = false
     } = req.body;
@@ -171,8 +167,6 @@ exports.createProduct = async (req, res) => {
       swiggy_price:    swiggy_price   != null && swiggy_price   !== '' ? Number(swiggy_price)   : null,
       zomato_packing:  zomato_packing != null && zomato_packing !== '' ? Number(zomato_packing) : null,
       swiggy_packing:  swiggy_packing != null && swiggy_packing !== '' ? Number(swiggy_packing) : null,
-      zomato_addon:    zomato_addon   != null && zomato_addon   !== '' ? Number(zomato_addon)   : null,
-      swiggy_addon:    swiggy_addon   != null && swiggy_addon   !== '' ? Number(swiggy_addon)   : null,
       image_url:       image_url || null,
       stock_item_id:   stock_item_id ? Number(stock_item_id) : null,
       is_sellable:     !!is_sellable,
@@ -192,7 +186,7 @@ exports.createProduct = async (req, res) => {
 
 exports.updateProduct = async (req, res) => {
   try {
-    const { name, category_id, price, zomato_price, swiggy_price, zomato_packing, swiggy_packing, zomato_addon, swiggy_addon, image_url, stock_item_id, is_sellable, is_manual_price, is_active } = req.body;
+    const { name, category_id, price, zomato_price, swiggy_price, zomato_packing, swiggy_packing, image_url, stock_item_id, is_sellable, is_manual_price, is_active } = req.body;
 
     const payload = {};
     if (name            !== undefined) payload.name            = name;
@@ -206,8 +200,6 @@ exports.updateProduct = async (req, res) => {
     if (swiggy_price    !== undefined) payload.swiggy_price    = swiggy_price   !== '' && swiggy_price   != null ? Number(swiggy_price)   : null;
     if (zomato_packing  !== undefined) payload.zomato_packing  = zomato_packing !== '' && zomato_packing != null ? Number(zomato_packing) : null;
     if (swiggy_packing  !== undefined) payload.swiggy_packing  = swiggy_packing !== '' && swiggy_packing != null ? Number(swiggy_packing) : null;
-    if (zomato_addon    !== undefined) payload.zomato_addon    = zomato_addon   !== '' && zomato_addon   != null ? Number(zomato_addon)   : null;
-    if (swiggy_addon    !== undefined) payload.swiggy_addon    = swiggy_addon   !== '' && swiggy_addon   != null ? Number(swiggy_addon)   : null;
     if (stock_item_id   !== undefined) payload.stock_item_id   = stock_item_id ? Number(stock_item_id) : null;
 
     payload.updated_at = new Date();
