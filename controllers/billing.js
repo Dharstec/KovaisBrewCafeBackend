@@ -392,7 +392,7 @@ exports.completeBill = async (req, res) => {
   const shopId = req.shop_id;
   try {
     const billId = req.params.id;
-    const { customer_name, payment_mode, grand_total, discount_amount = 0, bill_date } = req.body;
+    const { customer_name, payment_mode, grand_total, discount_amount = 0, bill_date, cash_amount, upi_amount } = req.body;
     const createdAt = (bill_date && req.role_type === 'Admin') ? bill_date : null;
 
     await client.query("BEGIN");
@@ -438,9 +438,18 @@ exports.completeBill = async (req, res) => {
            status           = 'COMPLETED',
            grand_total      = $3,
            discount_amount  = $4,
-           created_at       = COALESCE($6::timestamptz, created_at)
+           cash_amount      = $6,
+           upi_amount       = $7,
+           created_at       = COALESCE($8::timestamptz, created_at)
        WHERE id = $5`,
-      [customer_name, payment_mode, Number(grand_total) || 0, Number(discount_amount) || 0, billId, createdAt || null]
+      [
+        customer_name, payment_mode,
+        Number(grand_total) || 0, Number(discount_amount) || 0,
+        billId,
+        cash_amount != null ? Number(cash_amount) : null,
+        upi_amount  != null ? Number(upi_amount)  : null,
+        createdAt || null
+      ]
     );
 
     await _writeCompletionLogs(client, billId);
@@ -570,10 +579,14 @@ exports.completedBills = async (req, res) => {
 
     const summary = await DB.PostgresAny(
       `SELECT
-         SUM(CASE WHEN payment_mode = 'CASH' THEN grand_total ELSE 0 END) AS cash_total,
-         SUM(CASE WHEN payment_mode = 'UPI'  THEN grand_total ELSE 0 END) AS upi_total,
-         SUM(CASE WHEN platform = 'zomato'   THEN grand_total ELSE 0 END) AS zomato_total,
-         SUM(CASE WHEN platform = 'swiggy'   THEN grand_total ELSE 0 END) AS swiggy_total,
+         SUM(CASE WHEN payment_mode = 'CASH'  THEN grand_total
+                  WHEN payment_mode = 'SPLIT' THEN COALESCE(cash_amount, 0)
+                  ELSE 0 END) AS cash_total,
+         SUM(CASE WHEN payment_mode = 'UPI'   THEN grand_total
+                  WHEN payment_mode = 'SPLIT' THEN COALESCE(upi_amount, 0)
+                  ELSE 0 END) AS upi_total,
+         SUM(CASE WHEN platform = 'zomato'    THEN grand_total ELSE 0 END) AS zomato_total,
+         SUM(CASE WHEN platform = 'swiggy'    THEN grand_total ELSE 0 END) AS swiggy_total,
          SUM(grand_total) AS grand_total
        FROM bills ${where}`,
       params
@@ -750,7 +763,8 @@ exports.syncOfflineBill = async (req, res) => {
   try {
     const {
       items, customer_name, payment_mode,
-      grand_total, discount_amount = 0, local_id, platform, bill_date
+      grand_total, discount_amount = 0, local_id, platform, bill_date,
+      cash_amount, upi_amount
     } = req.body;
     const createdAt = (bill_date && req.role_type === 'Admin') ? bill_date : null;
 
@@ -772,13 +786,15 @@ exports.syncOfflineBill = async (req, res) => {
     await client.query("BEGIN");
 
     const billRes = await client.query(
-      `INSERT INTO bills (customer_name, status, grand_total, discount_amount, payment_mode, local_id, platform, created_at, shop_id)
-       VALUES ($1,'COMPLETED',$2,$3,$4,$5,$6,COALESCE($7::timestamptz, NOW()),$8) RETURNING id`,
+      `INSERT INTO bills (customer_name, status, grand_total, discount_amount, payment_mode, cash_amount, upi_amount, local_id, platform, created_at, shop_id)
+       VALUES ($1,'COMPLETED',$2,$3,$4,$5,$6,$7,$8,COALESCE($9::timestamptz, NOW()),$10) RETURNING id`,
       [
         customer_name,
         Number(grand_total) || 0,
         Number(discount_amount) || 0,
         payment_mode,
+        cash_amount != null ? Number(cash_amount) : null,
+        upi_amount  != null ? Number(upi_amount)  : null,
         local_id || null,
         platform || null,
         createdAt || null,
