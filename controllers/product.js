@@ -16,6 +16,7 @@ exports.getAllProductsBilling = async (req, res) => {
         p.zomato_price, p.swiggy_price,
         p.zomato_packing, p.swiggy_packing,
         p.image_url, p.category_id, p.is_manual_price,
+        p.shortcut_key,
         c.name AS category, p.stock_item_id,
         EXISTS(SELECT 1 FROM product_recipes pr WHERE pr.sale_product_id = p.id AND pr.shop_id = $1) AS has_recipe,
         CASE
@@ -85,7 +86,7 @@ exports.getAllProducts = async (req, res) => {
         p.zomato_packing, p.swiggy_packing,
         p.image_url, p.category_id,
         p.is_sellable, p.is_manual_price, p.is_active,
-        p.stock_item_id,
+        p.shortcut_key, p.stock_item_id,
         c.name AS category_name,
         si.name AS stock_item_name,
         (SELECT COUNT(*) FROM product_recipes pr
@@ -126,6 +127,7 @@ exports.getProductById = async (req, res) => {
              p.zomato_packing, p.swiggy_packing,
              p.image_url, p.category_id, p.stock_item_id,
              p.is_sellable, p.is_manual_price, p.is_active,
+             p.shortcut_key,
              c.name AS category_name,
              si.name AS stock_item_name
       FROM products p
@@ -149,7 +151,8 @@ exports.createProduct = async (req, res) => {
       zomato_price, swiggy_price,
       zomato_packing, swiggy_packing,
       image_url, stock_item_id,
-      is_sellable = true, is_manual_price = false
+      is_sellable = true, is_manual_price = false,
+      shortcut_key
     } = req.body;
 
     if (!name || !category_id) {
@@ -171,6 +174,7 @@ exports.createProduct = async (req, res) => {
       stock_item_id:   stock_item_id ? Number(stock_item_id) : null,
       is_sellable:     !!is_sellable,
       is_manual_price: !!is_manual_price,
+      shortcut_key:    shortcut_key ? shortcut_key.toLowerCase().trim() : null,
       base_unit:       'pcs',
       unit_label:      'pcs',
       is_active:       true,
@@ -186,7 +190,7 @@ exports.createProduct = async (req, res) => {
 
 exports.updateProduct = async (req, res) => {
   try {
-    const { name, category_id, price, zomato_price, swiggy_price, zomato_packing, swiggy_packing, image_url, stock_item_id, is_sellable, is_manual_price, is_active } = req.body;
+    const { name, category_id, price, zomato_price, swiggy_price, zomato_packing, swiggy_packing, image_url, stock_item_id, is_sellable, is_manual_price, is_active, shortcut_key } = req.body;
 
     const payload = {};
     if (name            !== undefined) payload.name            = name;
@@ -201,6 +205,7 @@ exports.updateProduct = async (req, res) => {
     if (zomato_packing  !== undefined) payload.zomato_packing  = zomato_packing !== '' && zomato_packing != null ? Number(zomato_packing) : null;
     if (swiggy_packing  !== undefined) payload.swiggy_packing  = swiggy_packing !== '' && swiggy_packing != null ? Number(swiggy_packing) : null;
     if (stock_item_id   !== undefined) payload.stock_item_id   = stock_item_id ? Number(stock_item_id) : null;
+    if (shortcut_key    !== undefined) payload.shortcut_key    = shortcut_key ? shortcut_key.toLowerCase().trim() : null;
 
     payload.updated_at = new Date();
 
