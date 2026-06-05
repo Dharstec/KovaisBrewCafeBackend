@@ -9,10 +9,10 @@ router.get("/dashboard/payment_breakdown", verifyToken, c.getPaymentBreakdown);
 router.get("/dashboard/daily_spend",       verifyToken, c.getDailySpend);
 router.get("/dashboard/range_summary",     verifyToken, c.getRangeSummary);
 
-// WhatsApp daily summary
-router.get( "/dashboard/whatsapp-status",  verifyToken, c.getWhatsappStatus);
-router.get( "/dashboard/whatsapp-groups",  verifyToken, c.getWhatsappGroups);
-router.get( "/dashboard/whatsapp-preview", verifyToken, c.previewWhatsapp);
-router.post("/dashboard/whatsapp-send-now",verifyToken, c.sendWhatsappNow);
+// WhatsApp routes disabled
+// router.get( "/dashboard/whatsapp-status",  verifyToken, c.getWhatsappStatus);
+// router.get( "/dashboard/whatsapp-groups",  verifyToken, c.getWhatsappGroups);
+// router.get( "/dashboard/whatsapp-preview", verifyToken, c.previewWhatsapp);
+// router.post("/dashboard/whatsapp-send-now",verifyToken, c.sendWhatsappNow);
 
 module.exports = router;

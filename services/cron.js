@@ -52,23 +52,8 @@ async function sendDailySummary(attempt = 1) {
 }
 
 function start() {
-  // 1) Warmup on boot so the session is live well before 11 PM.
-  warmup();
-
-  // 2) Schedule the daily send at 11:00 PM IST.
-  cron.schedule('0 23 * * *', () => sendDailySummary(1), { timezone: 'Asia/Kolkata' });
-
-  // 3) Safety net: if WhatsApp gets disconnected during the day, re-init every hour.
-  //    (Usually whatsapp.js's own disconnect handler retries in 30s, but this is a belt-and-braces.)
-  cron.schedule('0 * * * *', () => {
-    const { ready } = wa.getQR();
-    if (!ready) {
-      console.log('[Cron] Hourly check — WhatsApp not ready, re-initialising');
-      try { wa.init(); } catch (_) {}
-    }
-  }, { timezone: 'Asia/Kolkata' });
-
-  console.log('[Cron] Daily WhatsApp summary scheduled at 11:00 PM IST ✅');
+  // WhatsApp disabled — all cron jobs suspended
+  console.log('[Cron] WhatsApp disabled — no jobs scheduled');
 }
 
 module.exports = { start };

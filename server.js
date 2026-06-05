@@ -6,8 +6,9 @@ const bodyParser = require('body-parser');
 require("dotenv").config();
 
 /* ── Services ── */
-const cron = require('./services/cron');
-cron.start();   // schedule 11 PM daily WhatsApp summary
+// WhatsApp / cron disabled — service stopped
+// const cron = require('./services/cron');
+// cron.start();
 
 const app = express();
 app.set('trust proxy', 1);
