@@ -27,10 +27,16 @@ exports.getDashboardSummary = async (req, res) => {
       SELECT
         COUNT(*)                        AS total_bills,
         COALESCE(SUM(grand_total), 0)   AS total_sales,
-        COALESCE(SUM(grand_total) FILTER (WHERE payment_mode = 'CASH'), 0) AS cash_total,
-        COALESCE(SUM(grand_total) FILTER (WHERE payment_mode = 'UPI'),  0) AS upi_total,
-        COALESCE(SUM(grand_total) FILTER (WHERE platform = 'zomato'), 0)   AS zomato_total,
-        COALESCE(SUM(grand_total) FILTER (WHERE platform = 'swiggy'), 0)   AS swiggy_total
+        COALESCE(SUM(CASE
+          WHEN payment_mode = 'CASH'  THEN grand_total
+          WHEN payment_mode = 'SPLIT' THEN COALESCE(cash_amount, 0)
+          ELSE 0 END), 0) AS cash_total,
+        COALESCE(SUM(CASE
+          WHEN payment_mode = 'UPI' AND (platform IS NULL OR platform = '') THEN grand_total
+          WHEN payment_mode = 'SPLIT' THEN COALESCE(upi_amount, 0)
+          ELSE 0 END), 0) AS upi_total,
+        COALESCE(SUM(grand_total) FILTER (WHERE platform = 'zomato'), 0) AS zomato_total,
+        COALESCE(SUM(grand_total) FILTER (WHERE platform = 'swiggy'), 0) AS swiggy_total
       FROM bills
       WHERE status = 'COMPLETED'
         AND DATE(created_at) = ${dateExpr}
@@ -175,7 +181,6 @@ exports.getItemSalesChart = async (req, res) => {
         AND b.shop_id = ${shopParam}
       GROUP BY item_name
       ORDER BY total_count DESC
-      LIMIT 15
     `, params);
 
     res.json(data);
@@ -247,10 +252,16 @@ exports.getRangeSummary = async (req, res) => {
     const shopId = req.shop_id;
     const sales = await DB.PostgresAny(`
       SELECT
-        COALESCE(SUM(grand_total), 0)  AS total_sales,
-        COUNT(*)::INT                  AS total_bills,
-        COALESCE(SUM(grand_total) FILTER (WHERE payment_mode = 'CASH'), 0) AS cash_total,
-        COALESCE(SUM(grand_total) FILTER (WHERE payment_mode = 'UPI'),  0) AS upi_total
+        COALESCE(SUM(grand_total), 0) AS total_sales,
+        COUNT(*)::INT                 AS total_bills,
+        COALESCE(SUM(CASE
+          WHEN payment_mode = 'CASH'  THEN grand_total
+          WHEN payment_mode = 'SPLIT' THEN COALESCE(cash_amount, 0)
+          ELSE 0 END), 0) AS cash_total,
+        COALESCE(SUM(CASE
+          WHEN payment_mode = 'UPI' AND (platform IS NULL OR platform = '') THEN grand_total
+          WHEN payment_mode = 'SPLIT' THEN COALESCE(upi_amount, 0)
+          ELSE 0 END), 0) AS upi_total
       FROM bills
       WHERE status = 'COMPLETED'
         AND DATE(created_at) BETWEEN $1::date AND $2::date

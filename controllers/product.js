@@ -22,14 +22,36 @@ exports.getAllProductsBilling = async (req, res) => {
         CASE
           WHEN EXISTS(SELECT 1 FROM product_recipes pr WHERE pr.sale_product_id = p.id AND pr.shop_id = $1)
           THEN (
-            SELECT MIN(FLOOR(si.current_qty / NULLIF(pr.used_qty, 0)))
+            SELECT MIN(FLOOR(
+              GREATEST(0,
+                si.current_qty
+                - COALESCE((
+                    SELECT SUM(pbi.qty * pri.used_qty)
+                    FROM bills pb
+                    JOIN bill_items pbi ON pbi.bill_id = pb.id
+                    JOIN product_recipes pri
+                      ON pri.sale_product_id = pbi.product_id
+                     AND COALESCE(pri.stock_item_id, pri.raw_product_id) = si.id
+                     AND pri.shop_id = $1
+                    WHERE pb.status = 'PENDING' AND pb.shop_id = $1
+                  ), 0)
+              ) / NULLIF(pr.used_qty, 0)
+            ))
             FROM product_recipes pr
             JOIN stock_items si ON si.id = COALESCE(pr.stock_item_id, pr.raw_product_id)
             WHERE pr.sale_product_id = p.id AND pr.shop_id = $1 AND si.shop_id = $1
           )
           WHEN p.stock_item_id IS NOT NULL
           THEN (
-            SELECT FLOOR(si.current_qty)
+            SELECT GREATEST(0, FLOOR(
+              si.current_qty
+              - COALESCE((
+                  SELECT SUM(pbi.qty)
+                  FROM bills pb
+                  JOIN bill_items pbi ON pbi.bill_id = pb.id
+                  WHERE pb.status = 'PENDING' AND pbi.product_id = p.id AND pb.shop_id = $1
+                ), 0)
+            ))
             FROM stock_items si
             WHERE si.id = p.stock_item_id AND si.is_active = true AND si.shop_id = $1
           )

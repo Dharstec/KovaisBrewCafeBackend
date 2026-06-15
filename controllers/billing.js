@@ -297,7 +297,7 @@ exports.createBill = async (req, res) => {
       await client.query(
         `INSERT INTO bill_items (bill_id, product_id, product_name, price, qty, shop_id)
          VALUES ($1,$2,$3,$4,$5,$6)`,
-        [billId, i.productId, i.name, Number(i.price) || 0, i.qty, shopId]
+        [billId, i.productId || null, i.name, Number(i.price) || 0, i.qty, shopId]
       );
       total += Number(i.price) * Number(i.qty);
     }
@@ -807,7 +807,7 @@ exports.syncOfflineBill = async (req, res) => {
       await client.query(
         `INSERT INTO bill_items (bill_id, product_id, product_name, price, qty, shop_id)
          VALUES ($1,$2,$3,$4,$5,$6)`,
-        [billId, i.productId, i.name, Number(i.price) || 0, i.qty, shopId]
+        [billId, i.productId || null, i.name, Number(i.price) || 0, i.qty, shopId]
       );
     }
 
