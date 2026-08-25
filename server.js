@@ -5,11 +5,6 @@ const bodyParser = require('body-parser');
 
 require("dotenv").config();
 
-/* ── Services ── */
-// WhatsApp / cron disabled — service stopped
-// const cron = require('./services/cron');
-// cron.start();
-
 const app = express();
 app.set('trust proxy', 1);
 app.use(cors());

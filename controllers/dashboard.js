@@ -1,6 +1,4 @@
 const DB      = require("../middleware/dbFunctions");
-const wa      = require("../services/whatsapp");
-const summary = require("../services/dailySummary");
 
 /* ─────────────────────────────────────────
    HELPER — resolve the date param
@@ -355,73 +353,5 @@ exports.getPaymentBreakdown = async (req, res) => {
   } catch (err) {
     console.error('Payment breakdown failed:', err);
     res.status(500).json({ message: 'Payment breakdown failed' });
-  }
-};
-
-/* ─────────────────────────────────────────
-   GET /dashboard/whatsapp-status
-   Returns connection status + QR code (if not connected)
-   ───────────────────────────────────────── */
-exports.getWhatsappStatus = (_req, res) => {
-  const { qr, ready, error } = wa.getQR();
-  res.json({ ready, qr: qr || null, error: error || null });
-};
-
-/* ─────────────────────────────────────────
-   GET /dashboard/whatsapp-groups
-   Returns list of WhatsApp groups (once connected)
-   ───────────────────────────────────────── */
-exports.getWhatsappGroups = async (_req, res) => {
-  try {
-    const groups = await wa.getGroups();
-    res.json(groups);
-  } catch (err) {
-    res.status(503).json({ message: err.message });
-  }
-};
-
-/* ─────────────────────────────────────────
-   POST /dashboard/whatsapp-send-now
-   Admin: send daily summary immediately
-   Body: { groupId: "..." }  — optional override
-   ───────────────────────────────────────── */
-exports.sendWhatsappNow = async (req, res) => {
-  try {
-    const { ready } = wa.getQR();
-    if (!ready) {
-      return res.status(503).json({ message: 'WhatsApp not connected — please scan the QR code first.' });
-    }
-
-    // Extract clean chat ID — strip any prefix garbage, keep only XXXXXXXX@g.us or @c.us
-    const raw = (req.body.groupId || process.env.WHATSAPP_GROUP_ID || '').trim();
-    const match = raw.match(/(\d+@[gc]\.us)/);
-    const groupId = match ? match[1] : raw;
-    if (!groupId) {
-      return res.status(400).json({ message: 'No group selected. Choose a group from the list above.' });
-    }
-    console.log('[WhatsApp] Using groupId:', JSON.stringify(groupId));
-
-    const message = await summary.buildWhatsAppMessage();
-    await wa.sendToGroup(groupId, message);
-
-    if (req.body.groupId) process.env.WHATSAPP_GROUP_ID = req.body.groupId;
-
-    res.json({ ok: true, message: 'Summary sent to WhatsApp ✅' });
-  } catch (err) {
-    console.error('[WhatsApp send]', err);
-    res.status(503).json({ message: 'Send failed: ' + err.message });
-  }
-};
-
-/* ─────────────────────────────────────────
-   GET /dashboard/whatsapp-preview
-   Returns the formatted message text (no send)
-   ───────────────────────────────────────── */
-exports.previewWhatsapp = async (_req, res) => {
-  try {
-    const message = await summary.buildWhatsAppMessage();
-    res.json({ message });
-  } catch (err) {
-    res.status(500).json({ message: 'Failed to generate summary' });
   }
 };
