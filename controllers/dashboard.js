@@ -30,11 +30,9 @@ exports.getDashboardSummary = async (req, res) => {
           WHEN payment_mode = 'SPLIT' THEN COALESCE(cash_amount, 0)
           ELSE 0 END), 0) AS cash_total,
         COALESCE(SUM(CASE
-          WHEN payment_mode = 'UPI' AND (platform IS NULL OR platform = '') THEN grand_total
+          WHEN payment_mode = 'UPI'   THEN grand_total
           WHEN payment_mode = 'SPLIT' THEN COALESCE(upi_amount, 0)
-          ELSE 0 END), 0) AS upi_total,
-        COALESCE(SUM(grand_total) FILTER (WHERE platform = 'zomato'), 0) AS zomato_total,
-        COALESCE(SUM(grand_total) FILTER (WHERE platform = 'swiggy'), 0) AS swiggy_total
+          ELSE 0 END), 0) AS upi_total
       FROM bills
       WHERE status = 'COMPLETED'
         AND DATE(created_at) = ${dateExpr}
@@ -81,8 +79,6 @@ exports.getDashboardSummary = async (req, res) => {
       today_bills:   Number(sales[0].total_bills),
       cash_total:    Number(sales[0].cash_total),
       upi_total:     Number(sales[0].upi_total),
-      zomato_total:  Number(sales[0].zomato_total),
-      swiggy_total:  Number(sales[0].swiggy_total),
       pending_bills: Number(pendingBills[0].pending),
 
       products:   Number(products[0].count),
@@ -257,7 +253,7 @@ exports.getRangeSummary = async (req, res) => {
           WHEN payment_mode = 'SPLIT' THEN COALESCE(cash_amount, 0)
           ELSE 0 END), 0) AS cash_total,
         COALESCE(SUM(CASE
-          WHEN payment_mode = 'UPI' AND (platform IS NULL OR platform = '') THEN grand_total
+          WHEN payment_mode = 'UPI'   THEN grand_total
           WHEN payment_mode = 'SPLIT' THEN COALESCE(upi_amount, 0)
           ELSE 0 END), 0) AS upi_total
       FROM bills

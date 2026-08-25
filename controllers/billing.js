@@ -258,7 +258,7 @@ exports.createBill = async (req, res) => {
   const shopId = req.shop_id;
 
   try {
-    const { items, customer_name, local_id, platform, bill_date } = req.body;
+    const { items, customer_name, local_id, bill_date } = req.body;
     const createdAt = (bill_date && req.role_type === 'Admin') ? bill_date : null;
 
     if (!Array.isArray(items) || !items.length) {
@@ -286,9 +286,9 @@ exports.createBill = async (req, res) => {
     }
 
     const billRes = await client.query(
-      `INSERT INTO bills (customer_name, status, grand_total, local_id, platform, created_at, shop_id)
-       VALUES ($1, 'PENDING', 0, $2, $3, COALESCE($4::timestamptz, NOW()), $5) RETURNING id`,
-      [customer_name, local_id || null, platform || null, createdAt || null, shopId]
+      `INSERT INTO bills (customer_name, status, grand_total, local_id, created_at, shop_id)
+       VALUES ($1, 'PENDING', 0, $2, COALESCE($3::timestamptz, NOW()), $4) RETURNING id`,
+      [customer_name, local_id || null, createdAt || null, shopId]
     );
     const billId = billRes.rows[0].id;
     let total = 0;
@@ -536,7 +536,7 @@ exports.pendingBills = async (req, res) => {
 exports.completedBills = async (req, res) => {
   try {
     const shopId = req.shop_id;
-    const { start_date, end_date, page = 1, limit = 20, platform } = req.query;
+    const { start_date, end_date, page = 1, limit = 20 } = req.query;
 
     const pageNo   = Number(page);
     const pageSize = Number(limit);
@@ -548,13 +548,6 @@ exports.completedBills = async (req, res) => {
     if (start_date && end_date) {
       params.push(start_date, end_date);
       where += ` AND DATE(created_at) BETWEEN $${params.length - 1} AND $${params.length}`;
-    }
-
-    if (platform === 'regular') {
-      where += ` AND (platform IS NULL OR platform = '')`;
-    } else if (platform === 'zomato' || platform === 'swiggy') {
-      params.push(platform);
-      where += ` AND platform = $${params.length}`;
     }
 
     const bills = await DB.PostgresAny(
@@ -585,8 +578,6 @@ exports.completedBills = async (req, res) => {
          SUM(CASE WHEN payment_mode = 'UPI'   THEN grand_total
                   WHEN payment_mode = 'SPLIT' THEN COALESCE(upi_amount, 0)
                   ELSE 0 END) AS upi_total,
-         SUM(CASE WHEN platform = 'zomato'    THEN grand_total ELSE 0 END) AS zomato_total,
-         SUM(CASE WHEN platform = 'swiggy'    THEN grand_total ELSE 0 END) AS swiggy_total,
          SUM(grand_total) AS grand_total
        FROM bills ${where}`,
       params
@@ -660,7 +651,7 @@ exports.editCompletedBill = async (req, res) => {
     await client.query('BEGIN');
 
     const bill = await client.query(
-      `SELECT id, platform FROM bills WHERE id = $1 AND status = 'COMPLETED' AND shop_id = $2`,
+      `SELECT id FROM bills WHERE id = $1 AND status = 'COMPLETED' AND shop_id = $2`,
       [billId, shopId]
     );
     if (!bill.rows.length) {

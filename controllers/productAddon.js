@@ -6,7 +6,7 @@ exports.getAddons = async (req, res) => {
     const shopId    = req.shop_id;
 
     const data = await DB.PostgresAny(
-      `SELECT id, name, price, platform
+      `SELECT id, name, price
        FROM product_addons
        WHERE product_id = $1 AND shop_id = $2
        ORDER BY id ASC`,
@@ -23,16 +23,13 @@ exports.createAddon = async (req, res) => {
   try {
     const productId          = Number(req.params.productId);
     const shopId             = req.shop_id;
-    const { name, price, platform = 'both' } = req.body;
+    const { name, price } = req.body;
 
     if (!name || name.trim() === '') {
       return res.status(400).json({ message: "name is required" });
     }
     if (price == null || isNaN(Number(price)) || Number(price) < 0) {
       return res.status(400).json({ message: "price must be >= 0" });
-    }
-    if (!['zomato', 'swiggy', 'both'].includes(platform)) {
-      return res.status(400).json({ message: "platform must be zomato, swiggy or both" });
     }
 
     const product = await DB.PostgresAny(
@@ -47,7 +44,6 @@ exports.createAddon = async (req, res) => {
       product_id: productId,
       name:       name.trim(),
       price:      Number(price),
-      platform,
       shop_id:    shopId
     });
     res.status(201).json(row);
