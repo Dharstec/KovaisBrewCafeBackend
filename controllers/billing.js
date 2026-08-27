@@ -338,7 +338,7 @@ exports.updateBill = async (req, res) => {
     await client.query("BEGIN");
 
     const bill = await client.query(
-      `SELECT id FROM bills WHERE id = $1 AND status = 'PENDING' AND shop_id = $2`,
+      `SELECT id, coupon_code FROM bills WHERE id = $1 AND status = 'PENDING' AND shop_id = $2`,
       [billId, shopId]
     );
     if (!bill.rows.length) {
@@ -362,13 +362,39 @@ exports.updateBill = async (req, res) => {
       total += Number(i.price) * Number(i.qty);
     }
 
+    /* Re-validate any already-applied coupon against the new total.
+       Without this, editing the cart after applying a coupon left a
+       stale discount attached even if the bill no longer qualifies. */
+    let couponCode     = null;
+    let couponDiscount = 0;
+    if (bill.rows[0].coupon_code) {
+      const couponRes = await client.query(
+        `SELECT * FROM coupons
+         WHERE code = $1 AND shop_id = $2 AND is_active = true
+           AND (valid_from IS NULL OR valid_from <= CURRENT_DATE)
+           AND (valid_to   IS NULL OR valid_to   >= CURRENT_DATE)`,
+        [bill.rows[0].coupon_code, shopId]
+      );
+      if (couponRes.rows.length && total >= Number(couponRes.rows[0].min_bill_amount || 0)) {
+        const c = couponRes.rows[0];
+        let discount = c.discount_type === 'PERCENT'
+          ? (total * Number(c.discount_value)) / 100
+          : Number(c.discount_value);
+        if (c.max_discount && discount > Number(c.max_discount)) discount = Number(c.max_discount);
+        if (discount > total) discount = total;
+        couponCode     = bill.rows[0].coupon_code;
+        couponDiscount = discount;
+      }
+      // else: coupon no longer valid for the new total — leave it cleared
+    }
+
     await client.query(
-      `UPDATE bills SET grand_total = $1, customer_name = $2 WHERE id = $3`,
-      [total, customer_name, billId]
+      `UPDATE bills SET grand_total = $1, customer_name = $2, coupon_code = $3, coupon_discount = $4 WHERE id = $5`,
+      [total, customer_name, couponCode, couponDiscount, billId]
     );
 
     await client.query("COMMIT");
-    res.json({ message: "Bill updated", bill_id: billId, grand_total: total });
+    res.json({ message: "Bill updated", bill_id: billId, grand_total: total, coupon_discount: couponDiscount });
 
   } catch (err) {
     await client.query("ROLLBACK");
@@ -392,13 +418,13 @@ exports.completeBill = async (req, res) => {
   const shopId = req.shop_id;
   try {
     const billId = req.params.id;
-    const { customer_name, payment_mode, grand_total, discount_amount = 0, bill_date, cash_amount, upi_amount } = req.body;
+    const { customer_name, payment_mode, bill_date, cash_amount, upi_amount } = req.body;
     const createdAt = (bill_date && req.role_type === 'Admin') ? bill_date : null;
 
     await client.query("BEGIN");
 
     const existing = await client.query(
-      `SELECT status FROM bills WHERE id = $1 AND shop_id = $2`,
+      `SELECT status, coupon_discount FROM bills WHERE id = $1 AND shop_id = $2`,
       [billId, shopId]
     );
     if (!existing.rows.length) {
@@ -417,6 +443,15 @@ exports.completeBill = async (req, res) => {
       [billId]
     );
     const items = billItemsRes.rows;
+
+    /* Compute the authoritative total server-side from the actual bill
+       items and the bill's own (already-validated) coupon_discount,
+       rather than trusting whatever grand_total/discount_amount the
+       client sends - the client's cart state can be stale. */
+    const subtotal = items.reduce((sum, i) => sum + Number(i.price) * Number(i.qty), 0);
+    let discountAmount = Number(existing.rows[0].coupon_discount) || 0;
+    if (discountAmount > subtotal) discountAmount = subtotal;
+    const grandTotal = subtotal - discountAmount;
 
     /* Validate stock — collects all shortfalls so the UI can show the full picture */
     const stockCheck = await _validateStockForItems(client, items, shopId);
@@ -444,7 +479,7 @@ exports.completeBill = async (req, res) => {
        WHERE id = $5`,
       [
         customer_name, payment_mode,
-        Number(grand_total) || 0, Number(discount_amount) || 0,
+        grandTotal, discountAmount,
         billId,
         cash_amount != null ? Number(cash_amount) : null,
         upi_amount  != null ? Number(upi_amount)  : null,
