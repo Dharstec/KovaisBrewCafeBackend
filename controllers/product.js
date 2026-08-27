@@ -17,6 +17,7 @@ exports.getAllProductsBilling = async (req, res) => {
         p.shortcut_key,
         c.name AS category, p.stock_item_id,
         EXISTS(SELECT 1 FROM product_recipes pr WHERE pr.sale_product_id = p.id AND pr.shop_id = $1) AS has_recipe,
+        EXISTS(SELECT 1 FROM product_addons pa WHERE pa.product_id = p.id AND pa.shop_id = $1) AS has_addons,
         CASE
           WHEN EXISTS(SELECT 1 FROM product_recipes pr WHERE pr.sale_product_id = p.id AND pr.shop_id = $1)
           THEN (
